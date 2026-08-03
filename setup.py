@@ -25,6 +25,7 @@ setup(
             'detect = robot_project.perception.detect:main',
             'follow_person = robot_project.follow.follow_person:main',
             'nav = robot_project.navigation.nav:main',
+            'integrated_main = robot_project.main:main',
         ],
     },
 )

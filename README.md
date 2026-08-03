@@ -73,6 +73,38 @@ ros2 launch robot_project start.launch.py
 ros2 launch robot_project start.launch.py linear_speed:=0.4
 ```
 
+## 통합 실행 메인
+
+`robot_project/main.py`가 Perception, Follow Me, Navigation의 공통 실행점입니다.
+빌드 후 모드만 선택해 실행합니다.
+
+```bash
+# 카메라 + YOLO 인식만
+ros2 run robot_project integrated_main --mode perception
+
+# Perception + Follow Me 통합
+ros2 run robot_project integrated_main --mode follow --ros-args \
+  -p model_path:=/absolute/path/to/best.pt \
+  -p camera_topic:=/camera/image_raw \
+  -p linear_speed:=0.3
+
+# Nav2에 목표 좌표 전송
+ros2 run robot_project integrated_main --mode navigation --ros-args \
+  -p goal_x:=1.0 -p goal_y:=0.5 -p goal_yaw:=0.0
+```
+
+launch 파일로도 같은 모드를 선택할 수 있습니다.
+
+```bash
+ros2 launch robot_project start.launch.py mode:=perception
+ros2 launch robot_project start.launch.py mode:=follow linear_speed:=0.3
+ros2 launch robot_project start.launch.py mode:=navigation goal_x:=1.0 goal_y:=0.5
+```
+
+Follow Me와 Navigation은 둘 다 로봇 이동을 제어하므로 동시에 실행하지
+않고 모드 전환으로 사용합니다. Navigation 모드 전에는 map server, AMCL,
+planner/controller를 포함한 Nav2 bringup이 먼저 실행 중이어야 합니다.
+
 ## STEP 대응표 (기획서 기준)
 
 | STEP | 내용 | 관련 파일 | 상태 |

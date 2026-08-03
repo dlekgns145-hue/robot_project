@@ -1,12 +1,9 @@
-"""
-전체 실행용 launch 파일 (start.launch.py)
------------------------------------------
-현재는 1순위 목표(카메라 -> YOLO -> Follow Me)만 켜도록 구성되어 있음.
-SLAM / Navigation 노드는 준비되면 아래 주석을 해제해서 추가하면 됨.
+"""Launch the integrated Perception, Follow Me, or Navigation runner.
 
-실행 방법:
-    ros2 launch robot_project start.launch.py
-    ros2 launch robot_project start.launch.py linear_speed:=0.4   # 속도 바꿔서 테스트 (STEP1)
+Examples:
+    ros2 launch robot_project start.launch.py mode:=perception
+    ros2 launch robot_project start.launch.py mode:=follow linear_speed:=0.3
+    ros2 launch robot_project start.launch.py mode:=navigation goal_x:=1.0 goal_y:=0.5
 """
 
 from launch import LaunchDescription
@@ -16,45 +13,36 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    linear_speed_arg = DeclareLaunchArgument(
-        'linear_speed', default_value='0.2',
-        description='Follow Me 전진 속도 (STEP1: 이 값을 바꿔가며 테스트)',
+    arguments = [
+        DeclareLaunchArgument(
+            'mode', default_value='follow',
+            description='perception, follow, or navigation',
+        ),
+        DeclareLaunchArgument(
+            'linear_speed', default_value='0.2',
+            description='Follow Me forward speed',
+        ),
+        DeclareLaunchArgument('camera_topic', default_value='/camera/image_raw'),
+        DeclareLaunchArgument('model_path', default_value='perception/best.pt'),
+        DeclareLaunchArgument('goal_x', default_value='1.0'),
+        DeclareLaunchArgument('goal_y', default_value='0.5'),
+        DeclareLaunchArgument('goal_yaw', default_value='0.0'),
+    ]
+
+    integrated_node = Node(
+        package='robot_project',
+        executable='integrated_main',
+        output='screen',
+        arguments=[
+            '--mode', LaunchConfiguration('mode'),
+            '--ros-args',
+            '-p', ['linear_speed:=', LaunchConfiguration('linear_speed')],
+            '-p', ['camera_topic:=', LaunchConfiguration('camera_topic')],
+            '-p', ['model_path:=', LaunchConfiguration('model_path')],
+            '-p', ['goal_x:=', LaunchConfiguration('goal_x')],
+            '-p', ['goal_y:=', LaunchConfiguration('goal_y')],
+            '-p', ['goal_yaw:=', LaunchConfiguration('goal_yaw')],
+        ],
     )
 
-    return LaunchDescription([
-        linear_speed_arg,
-
-        # TODO: 카메라 드라이버 노드 - 실제 사용 중인 카메라 패키지에 맞게 수정
-        # (예시: v4l2_camera 사용 시)
-        # Node(
-        #     package='v4l2_camera',
-        #     executable='v4l2_camera_node',
-        #     name='camera_node',
-        #     output='screen',
-        # ),
-
-        Node(
-            package='robot_project',
-            executable='detect',
-            name='yolo_detect_node',
-            output='screen',
-        ),
-
-        Node(
-            package='robot_project',
-            executable='follow_person',
-            name='follow_person_node',
-            output='screen',
-            parameters=[{
-                'linear_speed': LaunchConfiguration('linear_speed'),
-            }],
-        ),
-
-        # TODO: Navigation(STEP 3) 준비되면 주석 해제
-        # Node(
-        #     package='robot_project',
-        #     executable='nav',
-        #     name='nav_goal_node',
-        #     output='screen',
-        # ),
-    ])
+    return LaunchDescription([*arguments, integrated_node])

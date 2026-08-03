@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QProcess, QSettings, Qt
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,7 +39,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Robot Control v2")
-        self.resize(1060, 720)
+        self.resize(1180, 860)
         self.settings_store = QSettings("robot-project", "robot-control-v2")
         self.client: RobotClient | None = None
         self.vision: VisionWorker | None = None
@@ -45,6 +47,8 @@ class MainWindow(QMainWindow):
         self.robot_connected = False
         self._last_robot_state: tuple[bool, str] | None = None
         self.follow_active = False
+        self.vision_mode: str | None = None
+        self.navigation_process: QProcess | None = None
         self._build_ui()
         self._load_settings()
 
@@ -58,7 +62,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(left, 3)
         layout.addLayout(right, 2)
 
-        self.video = QLabel("Follow를 시작하면 선택한 카메라가 표시됩니다")
+        self.video = QLabel("Perception이나 Follow Me를 시작하면 카메라가 표시됩니다")
         self.video.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video.setMinimumSize(640, 480)
         self.video.setStyleSheet("background:#15191f;color:#aab2bd;border-radius:8px;")
@@ -86,7 +90,7 @@ class MainWindow(QMainWindow):
         connection_form.addRow(self.connect_button, self.connection_label)
         right.addWidget(connection_group)
 
-        follow_group = QGroupBox("Follow")
+        follow_group = QGroupBox("기능 실행")
         follow_form = QFormLayout(follow_group)
         self.camera_source = QComboBox()
         self.camera_source.addItem("이 컴퓨터의 카메라", "local")
@@ -108,9 +112,25 @@ class MainWindow(QMainWindow):
         self.frame_skip = QSpinBox()
         self.frame_skip.setRange(1, 10)
         self.frame_skip.setValue(2)
-        self.follow_button = QPushButton("Follow 시작")
+        self.nav_x = self._double_spin(-100.0, 100.0, 1.0, 0.1)
+        self.nav_y = self._double_spin(-100.0, 100.0, 0.5, 0.1)
+        self.nav_yaw = self._double_spin(-3.14, 3.14, 0.0, 0.1)
+        feature_buttons = QGridLayout()
+        self.perception_button = QPushButton("Perception 시작")
+        self.perception_button.setCheckable(True)
+        self.perception_button.clicked.connect(self.toggle_perception)
+        self.follow_button = QPushButton("Follow Me 시작")
         self.follow_button.setCheckable(True)
         self.follow_button.clicked.connect(self.toggle_follow)
+        self.navigation_button = QPushButton("Navigation 시작")
+        self.navigation_button.setCheckable(True)
+        self.navigation_button.clicked.connect(self.toggle_navigation)
+        stop_features = QPushButton("전체 중지")
+        stop_features.clicked.connect(self.stop_all_features)
+        feature_buttons.addWidget(self.perception_button, 0, 0)
+        feature_buttons.addWidget(self.follow_button, 0, 1)
+        feature_buttons.addWidget(self.navigation_button, 1, 0)
+        feature_buttons.addWidget(stop_features, 1, 1)
         follow_form.addRow("카메라 입력", self.camera_source)
         follow_form.addRow("카메라 번호", self.camera_index)
         follow_form.addRow("영상 URL", self.camera_url)
@@ -119,7 +139,10 @@ class MainWindow(QMainWindow):
         follow_form.addRow("회전 속도", self.angular_speed)
         follow_form.addRow("정지 박스 비율", self.stop_ratio)
         follow_form.addRow("추론 프레임 간격", self.frame_skip)
-        follow_form.addRow(self.follow_button)
+        follow_form.addRow("Navigation X", self.nav_x)
+        follow_form.addRow("Navigation Y", self.nav_y)
+        follow_form.addRow("Navigation Yaw", self.nav_yaw)
+        follow_form.addRow(feature_buttons)
         right.addWidget(follow_group)
 
         manual_group = QGroupBox("수동 조작")
@@ -194,10 +217,17 @@ class MainWindow(QMainWindow):
         )
         self.token_edit.setText(self.settings_store.value("token", ""))
         source = self.settings_store.value("camera_source", "local")
+        saved_camera_url = self.settings_store.value("camera_url", "")
+        # Migrate the old broken state where "network" was saved with no URL.
+        if source == "network" and not str(saved_camera_url).strip():
+            source = "local"
         source_index = self.camera_source.findData(source)
         self.camera_source.setCurrentIndex(max(source_index, 0))
         self.camera_index.setValue(int(self.settings_store.value("camera_index", 0)))
-        self.camera_url.setText(self.settings_store.value("camera_url", ""))
+        self.camera_url.setText(saved_camera_url)
+        self.nav_x.setValue(float(self.settings_store.value("nav_x", 1.0)))
+        self.nav_y.setValue(float(self.settings_store.value("nav_y", 0.5)))
+        self.nav_yaw.setValue(float(self.settings_store.value("nav_yaw", 0.0)))
         self._update_camera_fields()
         default_model = Path(__file__).resolve().parents[2] / "yolov8n-pose.pt"
         self.model_edit.setText(self.settings_store.value("model", str(default_model)))
@@ -211,6 +241,9 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue("camera_index", self.camera_index.value())
         self.settings_store.setValue("camera_url", self.camera_url.text().strip())
         self.settings_store.setValue("model", self.model_edit.text().strip())
+        self.settings_store.setValue("nav_x", self.nav_x.value())
+        self.settings_store.setValue("nav_y", self.nav_y.value())
+        self.settings_store.setValue("nav_yaw", self.nav_yaw.value())
 
     def _update_camera_fields(self) -> None:
         local_camera = self.camera_source.currentData() == "local"
@@ -251,7 +284,8 @@ class MainWindow(QMainWindow):
         self.token_edit.setEnabled(False)
 
     def disconnect_robot(self) -> None:
-        self.stop_follow()
+        self.stop_vision()
+        self.stop_navigation()
         if self.client is not None:
             self.client.stop()
             if self.client.wait(3000):
@@ -324,20 +358,36 @@ class MainWindow(QMainWindow):
         if checked:
             self.start_follow()
         else:
-            self.stop_follow()
+            self.stop_vision()
+
+    def toggle_perception(self, checked: bool) -> None:
+        if checked:
+            self.start_perception()
+        else:
+            self.stop_vision()
+
+    def start_perception(self) -> None:
+        self._start_vision("perception")
 
     def start_follow(self) -> None:
         if self.client is None or not self.robot_connected:
             self.follow_button.setChecked(False)
-            QMessageBox.warning(self, "Follow", "먼저 Ubuntu VM에 연결하세요.")
+            QMessageBox.warning(
+                self, "Follow Me", "먼저 Ubuntu VM과 로봇에 연결하세요."
+            )
             return
+        self._start_vision("follow")
+
+    def _start_vision(self, mode: str) -> None:
+        if self.vision is not None:
+            if self.vision_mode == mode:
+                return
+            self.stop_vision()
         model_path = self.model_edit.text().strip()
         if not Path(model_path).is_file():
+            self.perception_button.setChecked(False)
             self.follow_button.setChecked(False)
-            QMessageBox.warning(self, "Follow", "YOLO 모델 파일을 확인하세요.")
-            return
-        if self.vision is not None:
-            self.follow_button.setChecked(False)
+            QMessageBox.warning(self, "Perception", "YOLO 모델 파일을 확인하세요.")
             return
         settings = FollowSettings(
             linear_speed=self.linear_speed.value(),
@@ -349,9 +399,13 @@ class MainWindow(QMainWindow):
         else:
             camera_input = self.camera_url.text().strip()
             if not camera_input:
+                self.perception_button.setChecked(False)
                 self.follow_button.setChecked(False)
-                QMessageBox.warning(self, "Follow", "네트워크 영상 URL을 입력하세요.")
+                QMessageBox.warning(
+                    self, "Perception", "네트워크 영상 URL을 입력하세요."
+                )
                 return
+        self.stop_navigation()
         self.vision = VisionWorker(
             camera_input,
             model_path,
@@ -364,13 +418,27 @@ class MainWindow(QMainWindow):
         self.vision.metrics_ready.connect(self.metrics_label.setText)
         self.vision.error.connect(self.on_vision_error)
         self.vision.start()
-        self.follow_active = True
-        self.follow_button.setChecked(True)
-        self.follow_button.setText("Follow 중지")
-        self.append_log("Follow 시작")
+        self.vision_mode = mode
+        self.follow_active = mode == "follow"
+        self.perception_button.setChecked(mode == "perception")
+        self.perception_button.setText(
+            "Perception 중지" if mode == "perception" else "Perception 시작"
+        )
+        self.follow_button.setChecked(mode == "follow")
+        self.follow_button.setText(
+            "Follow Me 중지" if mode == "follow" else "Follow Me 시작"
+        )
+        if mode == "perception" and self.client is not None:
+            self.client.set_command(0.0, 0.0)
+        self.append_log(
+            "Perception 시작 (영상/인식만)"
+            if mode == "perception"
+            else "Perception + Follow Me 통합 시작"
+        )
 
-    def stop_follow(self) -> None:
+    def stop_vision(self) -> None:
         self.follow_active = False
+        self.vision_mode = None
         if self.client is not None:
             self.client.set_command(0.0, 0.0)
         if self.vision is not None:
@@ -381,8 +449,120 @@ class MainWindow(QMainWindow):
                 worker.deleteLater()
             else:
                 worker.finished.connect(worker.deleteLater)
+        self.perception_button.setChecked(False)
+        self.perception_button.setText("Perception 시작")
         self.follow_button.setChecked(False)
-        self.follow_button.setText("Follow 시작")
+        self.follow_button.setText("Follow Me 시작")
+
+    # Backwards-compatible name used by the connection shutdown path.
+    def stop_follow(self) -> None:
+        self.stop_vision()
+
+    def toggle_navigation(self, checked: bool) -> None:
+        if checked:
+            self.start_navigation()
+        else:
+            self.stop_navigation()
+
+    def start_navigation(self) -> None:
+        configured = os.getenv("ROBOT_ROS2_EXECUTABLE", "ros2")
+        executable = shutil.which(configured)
+        if executable is None and Path(configured).is_file():
+            executable = configured
+        if executable is None:
+            self.navigation_button.setChecked(False)
+            QMessageBox.warning(
+                self,
+                "Navigation",
+                "ros2 실행 파일을 찾을 수 없습니다.\n"
+                "Navigation 버튼은 ROS2와 Nav2가 설치된 컴퓨터에서 "
+                "GUI를 실행했을 때 사용할 수 있습니다.",
+            )
+            return
+
+        self.stop_vision()
+        self.stop_navigation()
+        self._save_settings()
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(self._read_navigation_output)
+        process.finished.connect(self._navigation_finished)
+        process.errorOccurred.connect(
+            lambda error: self.append_log(f"Navigation 프로세스 오류: {error}")
+        )
+        self.navigation_process = process
+        arguments = [
+            "run",
+            "robot_project",
+            "integrated_main",
+            "--mode",
+            "navigation",
+            "--control-stdin",
+            "--ros-args",
+            "-p",
+            f"goal_x:={self.nav_x.value()}",
+            "-p",
+            f"goal_y:={self.nav_y.value()}",
+            "-p",
+            f"goal_yaw:={self.nav_yaw.value()}",
+        ]
+        process.start(executable, arguments)
+        if not process.waitForStarted(3000):
+            self.navigation_process = None
+            process.deleteLater()
+            self.navigation_button.setChecked(False)
+            QMessageBox.critical(
+                self, "Navigation", "Navigation 통합 프로세스를 시작하지 못했습니다."
+            )
+            return
+        self.navigation_button.setChecked(True)
+        self.navigation_button.setText("Navigation 중지")
+        self.append_log(
+            "Navigation 시작: "
+            f"x={self.nav_x.value():.2f}, y={self.nav_y.value():.2f}, "
+            f"yaw={self.nav_yaw.value():.2f}"
+        )
+
+    def _read_navigation_output(self) -> None:
+        if self.navigation_process is None:
+            return
+        output = bytes(self.navigation_process.readAllStandardOutput()).decode(
+            errors="replace"
+        )
+        for line in output.splitlines():
+            if line.strip():
+                self.append_log(f"[Navigation] {line}")
+
+    def _navigation_finished(self, exit_code: int, _status: object) -> None:
+        process = self.navigation_process
+        self.navigation_process = None
+        self.navigation_button.setChecked(False)
+        self.navigation_button.setText("Navigation 시작")
+        self.append_log(f"Navigation 종료 (code={exit_code})")
+        if process is not None:
+            process.deleteLater()
+
+    def stop_navigation(self) -> None:
+        process = self.navigation_process
+        if process is not None:
+            process.write(b"stop\n")
+            process.waitForBytesWritten(300)
+            if not process.waitForFinished(2000):
+                process.terminate()
+                if not process.waitForFinished(1000):
+                    process.kill()
+                    process.waitForFinished(1000)
+            if self.navigation_process is process:
+                self.navigation_process = None
+                process.deleteLater()
+        self.navigation_button.setChecked(False)
+        self.navigation_button.setText("Navigation 시작")
+
+    def stop_all_features(self) -> None:
+        self.stop_vision()
+        self.stop_navigation()
+        self.stop_motion()
+        self.append_log("전체 기능 중지")
 
     def on_follow_command(
         self, linear: float, angular: float, servo_pan: object, mode: str
@@ -397,7 +577,8 @@ class MainWindow(QMainWindow):
     def manual_motion(self, linear_scale: float, angular_scale: float) -> None:
         if self.client is None or not self.robot_connected:
             return
-        self.stop_follow()
+        self.stop_vision()
+        self.stop_navigation()
         linear = self.linear_speed.value() * linear_scale
         angular = self.angular_speed.value() * angular_scale
         self.client.set_command(linear, angular)
@@ -407,7 +588,8 @@ class MainWindow(QMainWindow):
             self.client.set_command(0.0, 0.0)
 
     def emergency_stop(self) -> None:
-        self.stop_follow()
+        self.stop_vision()
+        self.stop_navigation()
         if self.client is not None:
             self.client.emergency_stop()
         self.append_log("긴급 정지 명령")
@@ -435,6 +617,7 @@ class MainWindow(QMainWindow):
         for worker in self.findChildren(VisionWorker):
             worker.stop()
             worker.wait(3000)
+        self.stop_navigation()
         self.disconnect_robot()
         event.accept()
 

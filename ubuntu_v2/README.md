@@ -278,6 +278,17 @@ GUI 상태는 두 단계를 구분합니다.
 로봇 연결이 완료된 다음에만 Follow와 수동 주행을 시작합니다. 최초 테스트는
 바퀴를 공중에 띄운 상태에서 낮은 속도로 진행합니다.
 
+GUI 기능 버튼:
+
+- `Perception`: 맥 카메라와 YOLO로 영상/사람 인식만 실행하고 주행 명령은 보내지 않습니다.
+- `Follow Me`: Perception을 함께 시작하고 VM gateway로 추적 주행 명령을 보냅니다.
+- `Navigation`: ROS2/Nav2가 설치된 환경에서 통합 `integrated_main` 프로세스를 시작합니다.
+- `전체 중지`: 영상 추론과 Navigation 목표를 중지하고 정지 명령을 보냅니다.
+
+Follow Me와 Navigation은 동시에 로봇을 제어하지 않도록 서로 전환됩니다.
+맥에는 기본적으로 ROS2/Nav2가 없으므로 Navigation 버튼은 ROS 워크스테이션에서
+GUI를 실행했을 때 활성화됩니다.
+
 ## 8. 테스트
 
 ROS, Docker 또는 카메라가 필요 없는 테스트:
