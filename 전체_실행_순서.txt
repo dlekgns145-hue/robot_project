@@ -1,0 +1,292 @@
+Robot Control v2 전체 실행 순서 (macOS + Ubuntu VM + Raspberry Pi 로봇)
+=============================================================================
+
+[전체 구조]
+
+  맥 GUI  -- TCP 9999 -->  Ubuntu VM gateway  -- TCP 9999 -->  Raspberry Pi 로봇
+
+중요:
+  - GUI에는 로봇 IP가 아니라 Ubuntu VM IP를 입력한다.
+  - 맥과 로봇은 같은 Wi-Fi에 연결한다.
+  - UTM Ubuntu VM은 Shared Network를 사용한다.
+  - 첫 주행 테스트는 바퀴를 공중에 띄운 상태에서 한다.
+
+
+1. 매번 시작할 때 실행 순서
+=================================
+
+[1-1] 로봇 전원과 네트워크 확인
+
+1) Raspberry Pi 로봇 전원을 켠다.
+2) 로봇이 회사 Wi-Fi에 연결될 때까지 잠시 기다린다.
+3) 맥 터미널에서 확인한다.
+
+  ping -c 3 raspberrypi.local
+
+응답이 오면 맥과 로봇의 네트워크는 정상이다.
+
+
+[1-2] 로봇 서비스 실행
+
+맥 터미널을 3개 열고, 각 터미널에서 로봇에 SSH로 접속한다.
+
+  ssh <로봇계정>@raspberrypi.local
+
+로봇 터미널 1 - micro-ROS Agent:
+
+  sh ~/smart_agent.sh
+
+"이미 실행 중"이라고 나오면 정상이다. 중복 실행하지 않는다.
+
+로봇 터미널 2 - ROS 컨테이너와 바퀴 노드:
+
+  sh ~/smart_ros2.sh
+  ros2 node list
+
+출력에 /YB_Car_Node가 있으면 이미 실행 중이므로 추가 실행하지 않는다.
+없을 때만 다음을 실행한다.
+
+  ros2 run yahboomcar_base_node base_node_X3
+
+로봇 터미널 3 - TCP 명령 브리지:
+
+  sh ~/start_bridge.sh
+
+다음과 비슷한 메시지가 나오면 정상이다.
+
+  cmd_bridge ready. listening on 9999
+
+위 터미널은 실행 중에 닫지 않는다.
+
+맥에서 로봇 브리지를 확인한다.
+
+  nc -vz raspberrypi.local 9999
+
+Connection succeeded가 나와야 한다.
+
+
+[1-3] Ubuntu VM gateway 실행
+
+Ubuntu VM 터미널에서:
+
+  cd ~/ubuntu_v2
+  docker compose up -d gateway
+  docker compose ps
+  docker compose logs --tail=50 gateway
+
+정상 로그 예시:
+
+  robot gateway listening through TCP :9999
+  robot bridge connected: 172.30.1.x:9999
+
+VM IP 확인:
+
+  hostname -I
+
+보통 UTM Shared Network에서는 192.168.64.x 형태의 주소를 GUI에 사용한다.
+
+GUI 제어 토큰 확인:
+
+  grep '^COMMAND_TOKEN=' ~/ubuntu_v2/.env
+
+COMMAND_TOKEN= 뒤의 값을 GUI에 입력한다. 토큰은 다른 사람에게 공유하지 않는다.
+
+맥에서 VM gateway 연결을 확인한다.
+
+  nc -vz <VM_IP> 9999
+
+예:
+
+  nc -vz 192.168.64.5 9999
+
+Connection succeeded가 나와야 한다.
+
+
+[1-4] 맥 GUI 실행과 연결
+
+맥 터미널에서:
+
+  cd /Users/yorong/robot_project/ubuntu_v2/desktop_gui
+  open "Robot Control v2.app"
+
+GUI 연결값:
+
+  Ubuntu VM IP          : hostname -I로 확인한 VM 주소
+  명령 포트            : 9999
+  로봇 이름(보조 탐색) : raspberrypi.local
+  제어 토큰            : VM .env의 COMMAND_TOKEN
+
+"연결" 버튼을 누른다.
+
+정상 상태는 다음 두 단계로 표시된다.
+
+  1) Ubuntu VM 게이트웨이 연결됨
+  2) VM · 로봇 172.30.1.x 연결됨
+
+2번까지 확인한 뒤에만 수동 조작이나 Follow를 시작한다.
+
+
+[1-5] Follow Me 실행
+
+GUI에서:
+
+  카메라 입력       : 이 컴퓨터의 카메라
+  카메라 번호       : 0
+  YOLO 모델         : /Users/yorong/robot_project/yolov8n-pose.pt
+  전진 속도         : 처음에는 낮게 설정
+  회전 속도         : 처음에는 낮게 설정
+  정지 박스 비율   : 0.55
+  추론 프레임 간격 : 2
+
+"Follow 시작" 버튼을 누른다.
+
+정상이면:
+  - 왼쪽에 실시간 카메라 영상이 나온다.
+  - 사람 주위에 초록색 박스가 나온다.
+  - 영상에 NO PERSON, FORWARD, ALIGN, STOP, SEARCH 중 하나가 나온다.
+  - GUI의 "실제 명령"에 linear과 angular 값이 표시된다.
+
+
+2. 최초 1회 설정
+==================
+
+[2-1] Ubuntu VM 최초 설정
+
+Ubuntu VM에 ~/ubuntu_v2 폴더가 있다는 기준이다.
+
+  cd ~/ubuntu_v2
+  cp .env.robot-ready .env
+  sudo ufw allow 9999/tcp
+  chmod +x scripts/first_run_vm.sh
+  ./scripts/first_run_vm.sh
+
+.env가 이미 있으면 cp 명령으로 덮어쓰지 않는다.
+
+스크립트가 Docker gateway를 빌드하고 실행한다.
+
+
+[2-2] 맥 GUI 최초 설정
+
+  cd /Users/yorong/robot_project/ubuntu_v2/desktop_gui
+  ./setup_gui_macos.sh
+  open "Robot Control v2.app"
+
+macOS가 앱을 차단하면:
+  시스템 설정 -> 개인정보 보호 및 보안 -> 확인 없이 열기
+
+
+[2-3] 카메라 권한
+
+macOS에서:
+  시스템 설정 -> 개인정보 보호 및 보안 -> 카메라
+
+Robot Control v2를 허용한다.
+터미널에서 카메라를 테스트하려면 Terminal도 허용한다.
+권한을 바꾼 뒤에는 GUI를 완전히 종료하고 다시 실행한다.
+
+앱이 목록에 없거나 권한이 계속 거부되면:
+
+  tccutil reset Camera local.robot-project.control-v2
+
+앱을 다시 열고 카메라 팝업에서 "허용"을 누른다.
+
+카메라 0번 프레임 테스트:
+
+  cd /Users/yorong/robot_project
+  ./ubuntu_v2/desktop_gui/.venv/bin/python -c 'import cv2; c=cv2.VideoCapture(0); ok,f=c.read(); print("카메라 열림:",c.isOpened(),"프레임:",ok,"크기:",None if f is None else f.shape); c.release()'
+
+정상 출력:
+
+  카메라 열림: True 프레임: True
+
+
+3. 문제 발생 시 확인 순서
+============================
+
+[3-1] GUI에 영상이 안 나옴
+
+1) 시스템 설정에서 Robot Control v2 카메라 권한을 확인한다.
+2) 카메라 번호를 0으로 설정한다.
+3) 외장 카메라를 쓰면 1, 2도 순서대로 테스트한다.
+4) YOLO 모델 경로를 확인한다.
+
+  ls -lh /Users/yorong/robot_project/yolov8n-pose.pt
+
+5) GUI 로그의 "영상/YOLO 오류"를 확인한다.
+
+
+[3-2] GUI에서 VM 연결이 안 됨
+
+맥에서:
+
+  nc -vz <VM_IP> 9999
+
+실패하면 VM에서:
+
+  cd ~/ubuntu_v2
+  docker compose ps
+  docker compose logs --tail=100 gateway
+  sudo ufw status
+
+
+[3-3] VM은 연결되지만 로봇이 연결되지 않음
+
+맥에서:
+
+  ping -c 3 raspberrypi.local
+  nc -vz raspberrypi.local 9999
+
+로봇에서 start_bridge.sh가 실행 중인지 확인한다.
+VM에서 gateway 로그를 확인한다.
+
+  cd ~/ubuntu_v2
+  docker compose logs --tail=100 gateway
+
+
+[3-4] 수동 조작은 되지만 Follow만 안 됨
+
+1) GUI 카메라 영상이 나오는지 확인한다.
+2) 사람 주위에 초록색 박스가 나오는지 확인한다.
+3) GUI 모드를 확인한다.
+
+  NO PERSON : 사람을 인식하지 못함
+  SEARCH    : 사람을 잃어버려 회전 탐색 중
+  ALIGN     : 사람 방향으로 회전 중
+  FORWARD   : 사람을 향해 전진 명령 중
+  STOP      : 사람이 설정된 거리보다 가까워 정지
+
+4) "실제 명령" linear/ angular 값을 확인한다.
+5) 로봇의 LiDAR가 장애물을 감지하면 안전제어가 전진을 막을 수 있다.
+
+
+4. 종료 순서
+==============
+
+1) GUI에서 Follow 중지를 누른다.
+2) GUI에서 긴급 정지를 누른다.
+3) GUI를 종료한다.
+4) 로봇 브리지 터미널에서 Ctrl+C를 누른다.
+5) 필요하면 VM gateway를 종료한다.
+
+  cd ~/ubuntu_v2
+  docker compose stop gateway
+
+6) 로봇이 완전히 정지한 것을 확인한 뒤 전원을 끄는다.
+
+
+5. 빠른 체크리스트
+=================
+
+  [ ] 맥 -> raspberrypi.local ping 성공
+  [ ] 로봇 smart_agent.sh 실행
+  [ ] 로봇 /YB_Car_Node 확인
+  [ ] 로봇 start_bridge.sh 실행
+  [ ] 맥 -> raspberrypi.local:9999 연결 성공
+  [ ] VM gateway 실행
+  [ ] 맥 -> VM_IP:9999 연결 성공
+  [ ] GUI에서 "VM · 로봇 연결됨" 확인
+  [ ] Robot Control v2 카메라 권한 허용
+  [ ] GUI에 카메라 영상 표시
+  [ ] 사람 초록색 박스 표시
+  [ ] 바퀴를 든 상태에서 수동 조작 테스트
+  [ ] 바퀴를 든 상태에서 Follow 테스트
