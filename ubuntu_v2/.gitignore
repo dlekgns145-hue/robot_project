@@ -1,0 +1,4 @@
+.env
+desktop_gui/.venv/
+**/__pycache__/
+*.pyc

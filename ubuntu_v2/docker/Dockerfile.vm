@@ -1,0 +1,14 @@
+ARG BASE_IMAGE=yahboomtechnology/ros-humble:4.1.2
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /opt/robot-control-v2
+COPY robot_app/ ./robot_app/
+COPY docker/entrypoint.sh /usr/local/bin/robot-v2-entrypoint
+RUN chmod +x /usr/local/bin/robot-v2-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/robot-v2-entrypoint"]
+CMD ["python3", "/opt/robot-control-v2/robot_app/robot_service.py"]

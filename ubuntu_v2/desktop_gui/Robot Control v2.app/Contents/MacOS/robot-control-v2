@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MACOS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+GUI_DIR="$(cd -- "${MACOS_DIR}/../../.." && pwd)"
+PYTHON="${GUI_DIR}/.venv/bin/python"
+
+if [[ ! -x "${PYTHON}" ]]; then
+    osascript -e 'display alert "Robot Control v2" message "Run setup_gui_macos.sh first." as critical'
+    exit 1
+fi
+
+exec "${PYTHON}" "${GUI_DIR}/main.py"

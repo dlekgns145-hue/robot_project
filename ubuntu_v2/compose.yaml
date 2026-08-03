@@ -1,0 +1,107 @@
+name: robot-control-v2
+
+x-service-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-ros-service: &ros-service
+  image: ${ROBOT_IMAGE:-robot-control-v2:humble}
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.vm
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-yahboomtechnology/ros-humble:4.1.2}
+  network_mode: host
+  restart: unless-stopped
+  init: true
+  logging: *service-logging
+  profiles: [direct-hardware]
+  environment: &ros-environment
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
+    ROBOT_WORKSPACE_SETUP: ${ROBOT_WORKSPACE_SETUP:-/root/yahboomcar_ros2_ws/install/setup.bash}
+
+services:
+  # Default architecture: GUI -> Ubuntu VM gateway -> Raspberry Pi robot bridge.
+  # The robot's DHCP address is rediscovered from its stable Wi-Fi MAC address.
+  gateway:
+    image: ${ROBOT_GATEWAY_IMAGE:-robot-control-v2-gateway:bookworm}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gateway
+    container_name: robot-v2-gateway
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    cap_add:
+      - NET_RAW
+    logging: *service-logging
+    environment:
+      COMMAND_PORT: ${COMMAND_PORT:-9999}
+      COMMAND_TOKEN: ${COMMAND_TOKEN:-change-this-token}
+      CLIENT_IDLE_TIMEOUT_SEC: ${CLIENT_IDLE_TIMEOUT_SEC:-3.0}
+      MAX_LINEAR_SPEED: ${MAX_LINEAR_SPEED:-0.5}
+      MAX_ANGULAR_SPEED: ${MAX_ANGULAR_SPEED:-0.8}
+      ROBOT_MAC: ${ROBOT_MAC:-}
+      ROBOT_HOST: ${ROBOT_HOST:-raspberrypi.local}
+      ROBOT_IP: ${ROBOT_IP:-}
+      ROBOT_PORT: ${ROBOT_PORT:-9999}
+      ROBOT_INTERFACE: ${ROBOT_INTERFACE:-}
+      ROBOT_DISCOVERY_CIDR: ${ROBOT_DISCOVERY_CIDR:-}
+      ROBOT_DISCOVERY_CACHE_SEC: ${ROBOT_DISCOVERY_CACHE_SEC:-30}
+      ROBOT_DISCOVERY_TIMEOUT_SEC: ${ROBOT_DISCOVERY_TIMEOUT_SEC:-8}
+      ROBOT_CONNECT_TIMEOUT_SEC: ${ROBOT_CONNECT_TIMEOUT_SEC:-1.5}
+      ROBOT_RECONNECT_INTERVAL_SEC: ${ROBOT_RECONNECT_INTERVAL_SEC:-10}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import os,socket;
+          s=socket.create_connection(('127.0.0.1', int(os.environ['COMMAND_PORT'])), 1);
+          s.close()"
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  # Optional legacy/direct mode for robots whose micro-ROS board connects straight
+  # to this VM. It is deliberately not started by the default `compose up`.
+  ros-direct-bridge:
+    <<: *ros-service
+    container_name: robot-v2-ros-direct-bridge
+    command: ["python3", "/opt/robot-control-v2/robot_app/robot_service.py"]
+    environment:
+      <<: *ros-environment
+      COMMAND_PORT: ${DIRECT_COMMAND_PORT:-10099}
+      COMMAND_TOKEN: ${COMMAND_TOKEN:-change-this-token}
+      COMMAND_TIMEOUT_SEC: ${COMMAND_TIMEOUT_SEC:-0.7}
+      CLIENT_IDLE_TIMEOUT_SEC: ${CLIENT_IDLE_TIMEOUT_SEC:-3.0}
+      LIDAR_REQUIRED: ${LIDAR_REQUIRED:-true}
+      LIDAR_TIMEOUT_SEC: ${LIDAR_TIMEOUT_SEC:-1.0}
+      MAX_LINEAR_SPEED: ${MAX_LINEAR_SPEED:-0.5}
+      MAX_ANGULAR_SPEED: ${MAX_ANGULAR_SPEED:-0.8}
+
+  micro-ros-agent:
+    image: microros/micro-ros-agent:humble
+    container_name: robot-v2-micro-ros-agent
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    logging: *service-logging
+    profiles: [direct-hardware]
+    command: ${MICROROS_AGENT_ARGS:-udp4 --port 9999 -v6}
+
+  base-node:
+    <<: *ros-service
+    container_name: robot-v2-base-node
+    command:
+      - bash
+      - -lc
+      - >-
+        ros2 run ${BASE_NODE_PACKAGE:-yahboomcar_base_node}
+        ${BASE_NODE_EXECUTABLE:-base_node_X3}
+        ${BASE_NODE_ARGS:-}
+    depends_on:
+      micro-ros-agent:
+        condition: service_started
