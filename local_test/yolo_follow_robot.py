@@ -33,7 +33,7 @@ import cv2
 from ultralytics import YOLO
 
 # ---- 로봇 연결 설정 ----
-ROBOT_IP = "172.30.1.76"
+ROBOT_IP = "172.30.1.18"
 ROBOT_PORT = 9999
 
 # ---- YOLO / 판단 기준값 ----
