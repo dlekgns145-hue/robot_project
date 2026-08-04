@@ -1,0 +1,53 @@
+ROBOT COMPANION - 사용자용 GUI 실행법
+======================================
+
+이 폴더는 일반 사용자가 로봇을 간단히 조작하기 위한 GUI입니다.
+기존 desktop_gui 폴더의 관리자용 GUI는 변경하지 않습니다.
+
+[Windows 첫 설치]
+
+1. ZIP 파일을 전부 압축 해제합니다.
+2. ubuntu_v2\user_gui 폴더를 엽니다.
+3. 1_INSTALL_AND_RUN_WINDOWS.bat를 더블클릭합니다.
+4. 설치 창을 닫지 말고 GUI가 실행될 때까지 기다립니다.
+
+[Windows 다음 실행부터]
+
+run_user_gui_windows.vbs를 더블클릭합니다.
+오류가 발생하면 같은 폴더의 user_gui_error.log를 관리자에게 전달합니다.
+
+[macOS 첫 설치]
+
+1. ubuntu_v2/user_gui 폴더를 엽니다.
+2. 1_INSTALL_AND_RUN_MAC.command를 더블클릭합니다.
+3. macOS가 실행을 막으면 파일을 우클릭한 뒤 '열기'를 선택합니다.
+
+[macOS 다음 실행부터]
+
+run_user_gui_macos.command를 더블클릭합니다.
+
+[처음 연결할 때 입력할 값]
+
+- Ubuntu VM IP: 관리자가 알려준 VM 또는 Mac LAN 프록시 주소
+- 명령 포트: 기본값 9999
+- 로봇 주소: 기본값 raspberrypi.local
+- 제어 토큰: 관리자가 설정한 COMMAND_TOKEN
+
+한 번 연결하면 다음 실행 때 저장된 주소로 자동 연결합니다.
+
+[사용 방법]
+
+- 카메라 보기: 로봇 영상과 사람 인식 결과를 표시합니다.
+- Follow Me 시작: 인식한 사람을 따라갑니다.
+- 방향 버튼: 누르고 있는 동안만 움직이고 떼면 정지합니다.
+- 키보드: W/A/S/D 또는 방향키로 운전하고 Space로 정지합니다.
+- 긴급 정지: 카메라와 Follow Me를 끝내고 즉시 정지 명령을 보냅니다.
+
+[주의]
+
+- 로봇과 Ubuntu gateway를 먼저 실행해야 합니다.
+- 카메라를 보려면 PC에서 로봇의 TCP 8080 포트에 접근할 수 있어야 합니다.
+- 동시에 여러 GUI에서 조종하지 마세요. 다른 GUI의 연결을 먼저 해제합니다.
+- user_gui만 따로 옮기지 말고 ubuntu_v2 폴더 구조를 유지해야 합니다.
+  사용자 GUI는 desktop_gui의 검증된 통신/안전 모듈을 함께 사용합니다.
+- Python 3.10 이상이 필요합니다.

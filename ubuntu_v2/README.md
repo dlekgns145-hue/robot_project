@@ -3,6 +3,13 @@
 데스크톱 GUI, Ubuntu VM gateway, Raspberry Pi 자동시작을 묶은
 현재 운영 구조입니다.
 
+GUI는 두 종류로 분리되어 있습니다.
+
+- `desktop_gui`: 설정, 비전 튜닝, Navigation을 포함한 관리자용 GUI
+- `user_gui`: 카메라, Follow Me, 간편 운전 중심의 일반 사용자용 GUI
+
+사용자용 GUI의 설치와 실행은 `user_gui/사용자_GUI_실행법.txt`를 확인하세요.
+
 ## 최종 아키텍처
 
 ```text
