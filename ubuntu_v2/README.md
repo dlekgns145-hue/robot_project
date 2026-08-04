@@ -188,6 +188,39 @@ ROBOT_DISCOVERY_CIDR=172.30.1.0/24
 sudo ufw allow 9999/tcp
 ```
 
+### 같은 Wi-Fi의 다른 PC에서 UTM Ubuntu에 접속
+
+UTM의 Shared Network를 사용하면 `192.168.64.x` VM 주소는 Mac에서만 접근할 수
+있습니다. VM 네트워크 모드를 바꾸는 대신 Mac에 LAN 프록시를 설치하면 로봇 탐색
+구성은 그대로 두고 다른 PC에서도 접속할 수 있습니다. Ubuntu gateway가 실행된
+상태에서 **Mac 터미널**에 입력합니다.
+
+```bash
+cd ~/robot_project
+bash ubuntu_v2/scripts/install_macos_lan_proxy.sh 192.168.64.15 <다른-PC-IP>
+```
+
+스크립트가 출력한 Mac LAN IP와 `9999`를 다른 PC의 GUI에 입력하고, 기존과 같은
+제어 토큰을 사용합니다. 프록시는 Mac의 현재 Wi-Fi 주소에서만 수신하고 명령에 넣은
+다른 PC의 IP 한 대만 허용하며, 로그인 및 재부팅 후 자동으로 시작됩니다. macOS
+방화벽 확인 창이 나타나면 Python의 수신 연결을 허용해야 합니다.
+
+현재 설정과 로그 확인:
+
+```bash
+launchctl print gui/$(id -u)/com.robot-project.ubuntu-lan-proxy
+tail -f ~/Library/Logs/robot-control-lan-proxy.log
+```
+
+제거:
+
+```bash
+bash ubuntu_v2/scripts/uninstall_macos_lan_proxy.sh
+```
+
+안전을 위해 제어 gateway는 동시에 여러 운전자를 허용하지 않습니다. 다른 PC로
+제어권을 옮길 때는 기존 GUI의 연결을 먼저 해제합니다.
+
 ## 5. Ubuntu Docker 실행
 
 기본 실행에는 gateway 하나만 올라옵니다.
