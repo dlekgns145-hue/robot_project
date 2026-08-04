@@ -30,7 +30,7 @@ Robot Control v2 전체 실행 순서 (macOS + Ubuntu VM + Raspberry Pi 로봇)
 
 맥 터미널을 3개 열고, 각 터미널에서 로봇에 SSH로 접속한다.
 
-  ssh <로봇계정>@raspberrypi.local
+  ssh pi@raspberrypi.local
 
 로봇 터미널 1 - micro-ROS Agent:
 

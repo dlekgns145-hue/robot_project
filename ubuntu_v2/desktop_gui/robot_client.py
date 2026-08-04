@@ -15,6 +15,7 @@ class RobotClient(QThread):
     connection_changed = Signal(bool, str)
     status_received = Signal(dict)
     log_message = Signal(str)
+    STOP_BURST_COUNT = 5
 
     def __init__(
         self,
@@ -43,6 +44,8 @@ class RobotClient(QThread):
     def set_command(
         self, linear: float, angular: float, servo_pan: int | None = None
     ) -> None:
+        if self._shutdown_requested.is_set():
+            return
         command: dict[str, Any] = {
             "type": "command",
             "linear": float(linear),
@@ -58,9 +61,35 @@ class RobotClient(QThread):
             self._command = {"type": "emergency_stop"}
 
     def stop(self) -> None:
-        # Keep the worker alive long enough to transmit one latched emergency stop.
+        # The worker sends and acknowledges a stop burst before it exits.
         self.emergency_stop()
         self._shutdown_requested.set()
+
+    def _emergency_payload(self) -> bytes:
+        command: dict[str, Any] = {"type": "emergency_stop"}
+        if self.token:
+            command["token"] = self.token
+        return json.dumps(command, separators=(",", ":")).encode() + b"\n"
+
+    def _send_stop_burst(
+        self, connection: socket.socket, buffer: bytearray
+    ) -> bytearray:
+        payload = self._emergency_payload()
+        for _ in range(self.STOP_BURST_COUNT):
+            connection.sendall(payload)
+            _, buffer = self._read_line(connection, buffer)
+        return buffer
+
+    def _best_effort_stop(self) -> None:
+        try:
+            with socket.create_connection(
+                (self.host, self.port), timeout=0.5
+            ) as connection:
+                connection.settimeout(0.2)
+                connection.sendall(self._emergency_payload() * self.STOP_BURST_COUNT)
+        except OSError:
+            # The robot-side command timeout remains the final safety fallback.
+            pass
 
     def _current_command(self) -> dict[str, Any]:
         with self._command_lock:
@@ -105,6 +134,7 @@ class RobotClient(QThread):
     def run(self) -> None:
         while not self._stop_event.is_set():
             if self._shutdown_requested.is_set():
+                self._best_effort_stop()
                 self._stop_event.set()
                 break
             try:
@@ -119,6 +149,10 @@ class RobotClient(QThread):
                     buffer = bytearray()
                     next_send = time.monotonic()
                     while not self._stop_event.is_set():
+                        if self._shutdown_requested.is_set():
+                            buffer = self._send_stop_burst(connection, buffer)
+                            self._stop_event.set()
+                            break
                         payload = (
                             json.dumps(
                                 self._current_command(), separators=(",", ":")
@@ -136,10 +170,6 @@ class RobotClient(QThread):
                             )
                         else:
                             self.log_message.emit(str(response))
-
-                        if self._shutdown_requested.is_set():
-                            self._stop_event.set()
-                            break
 
                         next_send += 0.1
                         delay = next_send - time.monotonic()

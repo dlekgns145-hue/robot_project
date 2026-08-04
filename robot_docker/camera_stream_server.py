@@ -27,12 +27,12 @@ import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CAMERA_INDEX = 0          # /dev/video0
-FRAME_WIDTH = 320 #640
-FRAME_HEIGHT = 240 #480
-JPEG_QUALITY = 50 #70         # 0~100, 낮을수록 빠르고 화질은 떨어짐
+CAMERA_INDEX = 0  # /dev/video0
+FRAME_WIDTH = 320  # 640
+FRAME_HEIGHT = 240  # 480
+JPEG_QUALITY = 50  # 70         # 0~100, 낮을수록 빠르고 화질은 떨어짐
 TARGET_FPS = 15
-HOST = '0.0.0.0'
+HOST = "0.0.0.0"
 PORT = 8080
 
 latest_frame = None
@@ -48,22 +48,24 @@ def capture_loop():
     cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
 
     if not cap.isOpened():
-        print(f'[camera_stream] ERROR: /dev/video{CAMERA_INDEX} 를 열 수 없습니다.')
+        print(f"[camera_stream] ERROR: /dev/video{CAMERA_INDEX} 를 열 수 없습니다.")
         stop_flag = True
         return
 
-    print(f'[camera_stream] 카메라 열림 (index={CAMERA_INDEX}, '
-          f'{FRAME_WIDTH}x{FRAME_HEIGHT} @ {TARGET_FPS}fps 목표)')
+    print(
+        f"[camera_stream] 카메라 열림 (index={CAMERA_INDEX}, "
+        f"{FRAME_WIDTH}x{FRAME_HEIGHT} @ {TARGET_FPS}fps 목표)"
+    )
 
     interval = 1.0 / TARGET_FPS
     while not stop_flag:
         ok, frame = cap.read()
         if not ok:
-            print('[camera_stream] 프레임 읽기 실패, 재시도...')
+            print("[camera_stream] 프레임 읽기 실패, 재시도...")
             time.sleep(0.5)
             continue
 
-        ok, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if ok:
             with frame_lock:
                 latest_frame = jpeg.tobytes()
@@ -77,17 +79,17 @@ class StreamHandler(BaseHTTPRequestHandler):
         pass  # 콘솔 로그 스팸 방지
 
     def do_GET(self):
-        if self.path != '/stream.mjpg':
+        if self.path != "/stream.mjpg":
             self.send_response(404)
             self.end_headers()
-            self.wfile.write(b'Not found. Use /stream.mjpg')
+            self.wfile.write(b"Not found. Use /stream.mjpg")
             return
 
-        self.send_response(100)
-        self.send_header('Age', '0')
-        self.send_header('Cache-Control', 'no-cache, private')
-        self.send_header('Pragma', 'no-cache')
-        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
+        self.send_response(200)
+        self.send_header("Age", "0")
+        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=FRAME")
         self.end_headers()
 
         try:
@@ -97,14 +99,14 @@ class StreamHandler(BaseHTTPRequestHandler):
                 if frame is None:
                     time.sleep(0.05)
                     continue
-                self.wfile.write(b'--FRAME\r\n')
-                self.wfile.write(b'Content-Type: image/jpeg\r\n')
-                self.wfile.write(f'Content-Length: {len(frame)}\r\n\r\n'.encode())
+                self.wfile.write(b"--FRAME\r\n")
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode())
                 self.wfile.write(frame)
-                self.wfile.write(b'\r\n')
+                self.wfile.write(b"\r\n")
                 time.sleep(1.0 / TARGET_FPS)
         except (BrokenPipeError, ConnectionResetError):
-            print('[camera_stream] 클라이언트 연결 종료')
+            print("[camera_stream] 클라이언트 연결 종료")
 
 
 def main():
@@ -114,12 +116,12 @@ def main():
 
     time.sleep(1.0)
     if stop_flag:
-        print('[camera_stream] 카메라 초기화 실패로 서버를 시작하지 않습니다.')
+        print("[camera_stream] 카메라 초기화 실패로 서버를 시작하지 않습니다.")
         return
 
     server = ThreadingHTTPServer((HOST, PORT), StreamHandler)
-    print(f'camera stream ready on {HOST}:{PORT}')
-    print(f'  -> 노트북에서 사용할 주소: http://<로봇IP>:{PORT}/stream.mjpg')
+    print(f"camera stream ready on {HOST}:{PORT}")
+    print(f"  -> 노트북에서 사용할 주소: http://<로봇IP>:{PORT}/stream.mjpg")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -129,5 +131,5 @@ def main():
         server.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

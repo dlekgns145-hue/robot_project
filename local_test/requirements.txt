@@ -1,6 +1,0 @@
-ultralytics
-opencv-python
-
-# 아래는 MediaPipe 버전(mediapipe_follow_test.py) 테스트하고 싶을 때만 필요 (현재는 미사용, 백업용)
-# mediapipe==0.10.21
-# numpy

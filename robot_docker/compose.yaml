@@ -1,0 +1,62 @@
+name: robot-control-rpi
+
+x-ros-service: &ros-service
+  image: robot-control-rpi:latest
+  network_mode: host
+  restart: unless-stopped
+  init: true
+  environment:
+    ROS_DOMAIN_ID: "20"
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  agent:
+    image: microros/micro-ros-agent:humble
+    container_name: robot-microros-agent
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    privileged: true
+    environment:
+      ROS_DOMAIN_ID: "20"
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm
+    command: ["serial", "--dev", "/dev/ttyUSB0", "-b", "921600", "-v4"]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  base:
+    <<: *ros-service
+    container_name: robot-base-node
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
+    command: ["base"]
+    depends_on:
+      - agent
+
+  bridge:
+    <<: *ros-service
+    container_name: robot-command-bridge
+    command: ["bridge"]
+    depends_on:
+      - agent
+
+  camera:
+    <<: *ros-service
+    container_name: robot-camera-stream
+    command: ["camera"]
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /dev/shm:/dev/shm

@@ -1,12 +1,13 @@
 # Robot Control v2
 
-기존 `local_test/`와 `robot_project/`를 건드리지 않고 새로 만든 실행 구조입니다.
+데스크톱 GUI, Ubuntu VM gateway, Raspberry Pi 자동시작을 묶은
+현재 운영 구조입니다.
 
 ## 최종 아키텍처
 
 ```text
 Windows/macOS GUI
-  - 로컬 카메라
+  - 로봇 MJPEG 카메라(기본) 또는 로컬 카메라
   - YOLO
   - 수동/Follow 명령
         │ TCP 9999 (고정 대상: Ubuntu VM)
@@ -235,11 +236,41 @@ docker compose --profile direct-hardware up -d
 ```bash
 cd ~/ubuntu_v2
 sudo ./scripts/install_vm_ubuntu.sh
-sudo nano /opt/robot-control-v2/.env
-cd /opt/robot-control-v2
-sudo docker compose build gateway
-sudo systemctl start robot-control-v2
 sudo systemctl status robot-control-v2
+```
+
+`install_vm_ubuntu.sh`는 gateway 이미지를 빌드하고 서비스를 즉시
+시작합니다. 이후 Ubuntu가 부팅되면 gateway도 자동으로 실행됩니다.
+
+## 6-1. 로봇 Raspberry Pi 부팅 시 자동 시작
+
+로봇 런타임은 systemd 스크립과 `--rm` 컨테이너를 사용하지 않습니다.
+Yahboom ROS 이미지에 브리지와 카메라 코드를 구운 사용자 이미지를
+만들고 Docker Compose만 전체 생명주기를 관리합니다.
+
+Mac에서 한 번만 배포합니다.
+
+```bash
+ssh pi@172.30.1.18 'mkdir -p ~/robot-control-deploy'
+scp robot_docker/* pi@172.30.1.18:~/robot-control-deploy/
+ssh pi@172.30.1.18
+sudo bash ~/robot-control-deploy/install.sh
+```
+
+설치 스크립트는 기존 중복 컨테이너와 `robot-control-*` systemd
+서비스를 제거하고 다음 고정 컨테이너 이름을 사용합니다.
+
+- `robot-microros-agent`
+- `robot-base-node`
+- `robot-command-bridge`
+- `robot-camera-stream`
+
+확인:
+
+```bash
+cd ~/robot-control-deploy
+docker compose ps
+docker compose logs --tail=100
 ```
 
 ## 7. GUI 실행
@@ -261,6 +292,9 @@ cd ubuntu_v2/desktop_gui
 
 그다음 `Robot Control v2.app` 또는 `run_gui_macos.command`를 실행합니다.
 
+GUI는 저장된 Ubuntu VM IP가 있으면 시작 직후 자동으로 연결하고,
+연결이 끊기면 백그라운드에서 계속 재연결합니다.
+
 GUI 연결값:
 
 ```text
@@ -269,6 +303,17 @@ Ubuntu VM IP: VM의 현재 주소
 제어 토큰: VM .env의 COMMAND_TOKEN
 로봇 이름(보조 탐색): raspberrypi.local
 ```
+
+위 Raspberry Pi Docker 런타임을 설치하면 MJPEG 카메라 서버도
+부팅 시 자동으로 실행됩니다. 수동 진단:
+
+```bash
+docker logs --tail=100 robot-camera-stream
+```
+
+`camera stream ready on 0.0.0.0:8080`이 표시되면 GUI의 카메라
+입력에서 `로봇 카메라 (자동)`을 선택합니다. GUI는 gateway가 알려준
+현재 로봇 IP로 `http://<로봇 IP>:8080/stream.mjpg`를 자동 구성합니다.
 
 GUI 상태는 두 단계를 구분합니다.
 
@@ -280,7 +325,7 @@ GUI 상태는 두 단계를 구분합니다.
 
 GUI 기능 버튼:
 
-- `Perception`: 맥 카메라와 YOLO로 영상/사람 인식만 실행하고 주행 명령은 보내지 않습니다.
+- `Perception`: 선택한 카메라와 YOLO로 영상/사람 인식만 실행하고 주행 명령은 보내지 않습니다.
 - `Follow Me`: Perception을 함께 시작하고 VM gateway로 추적 주행 명령을 보냅니다.
 - `Navigation`: ROS2/Nav2가 설치된 환경에서 통합 `integrated_main` 프로세스를 시작합니다.
 - `전체 중지`: 영상 추론과 Navigation 목표를 중지하고 정지 명령을 보냅니다.

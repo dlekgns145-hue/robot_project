@@ -8,13 +8,15 @@ import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QSettings, Qt
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtCore import QEvent, QProcess, QSettings, QTimer, Qt
+from PySide6.QtGui import QCloseEvent, QFont, QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -25,6 +27,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -32,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from control_logic import FollowSettings
 from robot_client import RobotClient
+from theme import APP_STYLESHEET
 from vision_worker import VisionWorker
 
 
@@ -39,60 +44,181 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Robot Control v2")
-        self.resize(1180, 860)
+        self.resize(1380, 900)
+        self.setMinimumSize(960, 640)
         self.settings_store = QSettings("robot-project", "robot-control-v2")
         self.client: RobotClient | None = None
         self.vision: VisionWorker | None = None
         self.gateway_connected = False
         self.robot_connected = False
+        self.current_robot_ip = ""
         self._last_robot_state: tuple[bool, str] | None = None
         self.follow_active = False
         self.vision_mode: str | None = None
         self.navigation_process: QProcess | None = None
+        self._manual_keys: set[int] = set()
         self._build_ui()
         self._load_settings()
+        QTimer.singleShot(400, self._auto_connect)
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setObjectName("AppRoot")
         self.setCentralWidget(root)
-        layout = QHBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(22, 20, 22, 22)
+        root_layout.setSpacing(18)
+
+        header = QFrame()
+        header.setObjectName("HeaderPanel")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(22, 15, 18, 15)
+
+        brand = QVBoxLayout()
+        brand.setSpacing(2)
+        eyebrow = QLabel("ROBOT OPERATIONS")
+        eyebrow.setObjectName("Eyebrow")
+        title = QLabel("Control Center")
+        title.setObjectName("AppTitle")
+        subtitle = QLabel("실시간 비전 · 자율주행 · 원격 제어")
+        subtitle.setObjectName("Subtitle")
+        brand.addWidget(eyebrow)
+        brand.addWidget(title)
+        brand.addWidget(subtitle)
+        header_layout.addLayout(brand)
+        header_layout.addStretch(1)
+
+        self.connection_label = QLabel("●  연결 안 됨")
+        self.connection_label.setObjectName("ConnectionStatus")
+        self.connection_label.setProperty("state", "offline")
+        self.connection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(self.connection_label)
+        root_layout.addWidget(header)
+
+        body = QHBoxLayout()
+        body.setSpacing(18)
+        root_layout.addLayout(body, 1)
 
         left = QVBoxLayout()
-        right = QVBoxLayout()
-        layout.addLayout(left, 3)
-        layout.addLayout(right, 2)
+        left.setSpacing(14)
+        body.addLayout(left, 1)
 
-        self.video = QLabel("Perception이나 Follow Me를 시작하면 카메라가 표시됩니다")
-        self.video.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video.setMinimumSize(640, 480)
-        self.video.setStyleSheet("background:#15191f;color:#aab2bd;border-radius:8px;")
-        left.addWidget(self.video, 1)
-
+        preview_card = QFrame()
+        preview_card.setObjectName("PreviewCard")
+        preview_layout = QVBoxLayout(preview_card)
+        preview_layout.setContentsMargins(16, 14, 16, 16)
+        preview_layout.setSpacing(10)
+        preview_header = QHBoxLayout()
+        preview_title = QLabel("LIVE VISION")
+        preview_title.setObjectName("SectionKicker")
         self.metrics_label = QLabel("영상 대기 중")
-        left.addWidget(self.metrics_label)
+        self.metrics_label.setObjectName("VisionMetrics")
+        preview_hint = QLabel("ROBOT CAMERA")
+        preview_hint.setObjectName("CameraBadge")
+        preview_header.addWidget(preview_title)
+        preview_header.addStretch(1)
+        preview_header.addWidget(self.metrics_label)
+        preview_header.addWidget(preview_hint)
+        preview_layout.addLayout(preview_header)
 
-        connection_group = QGroupBox("연결")
+        self.video = QLabel(
+            "카메라 스트림 대기 중\nPerception 또는 Follow Me를 시작하세요"
+        )
+        self.video.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Keep the preview responsive on shorter laptop displays. A large fixed
+        # minimum caused the metrics strip to paint over the camera image.
+        self.video.setMinimumSize(400, 140)
+        self.video.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.video.setObjectName("VideoSurface")
+        preview_layout.addWidget(self.video, 1)
+        left.addWidget(preview_card, 1)
+
+        telemetry_group = QGroupBox("실시간 텔레메트리")
+        telemetry = QGridLayout(telemetry_group)
+        telemetry.setHorizontalSpacing(10)
+        telemetry.setVerticalSpacing(10)
+        self.robot_address_label = QLabel("-")
+        self.lidar_label = QLabel("-")
+        self.distance_label = QLabel("-")
+        self.avoid_label = QLabel("-")
+        self.applied_label = QLabel("-")
+        telemetry.addWidget(
+            self._metric_card("ROBOT", self.robot_address_label), 0, 0, 1, 2
+        )
+        telemetry.addWidget(
+            self._metric_card("COMMAND", self.applied_label), 0, 2
+        )
+        telemetry.addWidget(self._metric_card("LIDAR", self.lidar_label), 1, 0)
+        telemetry.addWidget(
+            self._metric_card("FRONT", self.distance_label), 1, 1
+        )
+        telemetry.addWidget(self._metric_card("AVOID", self.avoid_label), 1, 2)
+        left.addWidget(telemetry_group)
+
+        log_group = QGroupBox("시스템 로그")
+        log_layout = QVBoxLayout(log_group)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(300)
+        self.log.setMinimumHeight(60)
+        self.log.setMaximumHeight(100)
+        log_layout.addWidget(self.log)
+        left.addWidget(log_group)
+
+        right_scroll = QScrollArea()
+        right_scroll.setObjectName("ControlScroll")
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        right_scroll.setMinimumWidth(410)
+        right_scroll.setMaximumWidth(480)
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+        right_column.addWidget(right_scroll, 1)
+        body.addLayout(right_column)
+        right_panel = QWidget()
+        right_panel.setObjectName("ControlPanel")
+        right = QVBoxLayout(right_panel)
+        right.setContentsMargins(0, 0, 4, 0)
+        right.setSpacing(14)
+        right_scroll.setWidget(right_panel)
+
+        connection_group = QGroupBox("연결 설정")
         connection_form = QFormLayout(connection_group)
+        connection_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("예: 192.168.64.15")
         self.command_port = QSpinBox()
         self.command_port.setRange(1, 65535)
         self.robot_host_edit = QLineEdit()
         self.robot_host_edit.setPlaceholderText("raspberrypi.local")
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.connect_button = QPushButton("연결")
+        self.token_edit.setPlaceholderText("저장된 제어 토큰")
+        self.connect_button = QPushButton("서버에 연결")
+        self.connect_button.setProperty("role", "primary")
+        self.connect_button.setMinimumHeight(42)
         self.connect_button.clicked.connect(self.toggle_connection)
-        self.connection_label = QLabel("연결 안 됨")
         connection_form.addRow("Ubuntu VM IP", self.host_edit)
         connection_form.addRow("명령 포트", self.command_port)
-        connection_form.addRow("로봇 이름(보조 탐색)", self.robot_host_edit)
+        connection_form.addRow("로봇 주소", self.robot_host_edit)
         connection_form.addRow("제어 토큰", self.token_edit)
-        connection_form.addRow(self.connect_button, self.connection_label)
+        connection_form.addRow(self.connect_button)
         right.addWidget(connection_group)
 
-        follow_group = QGroupBox("기능 실행")
+        follow_group = QGroupBox("자동화 및 비전")
         follow_form = QFormLayout(follow_group)
+        follow_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         self.camera_source = QComboBox()
+        self.camera_source.addItem("로봇 카메라 (자동)", "robot")
         self.camera_source.addItem("이 컴퓨터의 카메라", "local")
         self.camera_source.addItem("네트워크 영상 URL", "network")
         self.camera_source.currentIndexChanged.connect(self._update_camera_fields)
@@ -103,6 +229,7 @@ class MainWindow(QMainWindow):
         model_row = QHBoxLayout()
         self.model_edit = QLineEdit()
         browse_button = QPushButton("찾기")
+        browse_button.setProperty("role", "quiet")
         browse_button.clicked.connect(self.choose_model)
         model_row.addWidget(self.model_edit, 1)
         model_row.addWidget(browse_button)
@@ -116,81 +243,98 @@ class MainWindow(QMainWindow):
         self.nav_y = self._double_spin(-100.0, 100.0, 0.5, 0.1)
         self.nav_yaw = self._double_spin(-3.14, 3.14, 0.0, 0.1)
         feature_buttons = QGridLayout()
-        self.perception_button = QPushButton("Perception 시작")
+        self.perception_button = QPushButton("비전 인식 시작")
+        self.perception_button.setProperty("role", "primary")
         self.perception_button.setCheckable(True)
         self.perception_button.clicked.connect(self.toggle_perception)
-        self.follow_button = QPushButton("Follow Me 시작")
+        self.follow_button = QPushButton("Follow Me")
+        self.follow_button.setProperty("role", "primary")
         self.follow_button.setCheckable(True)
         self.follow_button.clicked.connect(self.toggle_follow)
-        self.navigation_button = QPushButton("Navigation 시작")
+        self.navigation_button = QPushButton("Navigation")
+        self.navigation_button.setProperty("role", "secondary")
         self.navigation_button.setCheckable(True)
         self.navigation_button.clicked.connect(self.toggle_navigation)
         stop_features = QPushButton("전체 중지")
+        stop_features.setProperty("role", "quiet")
         stop_features.clicked.connect(self.stop_all_features)
+        for button in (
+            self.perception_button,
+            self.follow_button,
+            self.navigation_button,
+            stop_features,
+        ):
+            button.setMinimumHeight(40)
         feature_buttons.addWidget(self.perception_button, 0, 0)
         feature_buttons.addWidget(self.follow_button, 0, 1)
         feature_buttons.addWidget(self.navigation_button, 1, 0)
         feature_buttons.addWidget(stop_features, 1, 1)
+        follow_form.addRow(feature_buttons)
         follow_form.addRow("카메라 입력", self.camera_source)
         follow_form.addRow("카메라 번호", self.camera_index)
         follow_form.addRow("영상 URL", self.camera_url)
         follow_form.addRow("YOLO 모델", model_row)
         follow_form.addRow("전진 속도", self.linear_speed)
         follow_form.addRow("회전 속도", self.angular_speed)
-        follow_form.addRow("정지 박스 비율", self.stop_ratio)
-        follow_form.addRow("추론 프레임 간격", self.frame_skip)
-        follow_form.addRow("Navigation X", self.nav_x)
-        follow_form.addRow("Navigation Y", self.nav_y)
-        follow_form.addRow("Navigation Yaw", self.nav_yaw)
-        follow_form.addRow(feature_buttons)
+        follow_form.addRow("정지 감도", self.stop_ratio)
+        follow_form.addRow("추론 간격", self.frame_skip)
+        navigation_title = QLabel("NAVIGATION GOAL")
+        navigation_title.setObjectName("SubsectionLabel")
+        follow_form.addRow(navigation_title)
+        follow_form.addRow("X", self.nav_x)
+        follow_form.addRow("Y", self.nav_y)
+        follow_form.addRow("Yaw", self.nav_yaw)
         right.addWidget(follow_group)
 
-        manual_group = QGroupBox("수동 조작")
+        manual_group = QGroupBox("수동 주행")
         manual = QGridLayout(manual_group)
-        forward = QPushButton("▲ 전진")
-        left_turn = QPushButton("◀ 좌회전")
-        stop = QPushButton("■ 정지")
-        right_turn = QPushButton("우회전 ▶")
-        backward = QPushButton("▼ 후진")
+        manual.setSpacing(8)
+        forward = QPushButton("▲\n전진")
+        left_turn = QPushButton("◀\n좌회전")
+        stop = QPushButton("■\n정지")
+        right_turn = QPushButton("▶\n우회전")
+        backward = QPushButton("▼\n후진")
+        for button in (forward, left_turn, stop, right_turn, backward):
+            button.setProperty("role", "drive")
+            button.setMinimumHeight(54)
+        stop.setProperty("role", "driveStop")
         manual.addWidget(forward, 0, 1)
         manual.addWidget(left_turn, 1, 0)
         manual.addWidget(stop, 1, 1)
         manual.addWidget(right_turn, 1, 2)
         manual.addWidget(backward, 2, 1)
+        keyboard_hint = QLabel("키보드  ↑ ↓ ← →  또는  W A S D   ·   Space 정지")
+        keyboard_hint.setObjectName("ControlHint")
+        keyboard_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        manual.addWidget(keyboard_hint, 3, 0, 1, 3)
         self._bind_hold_button(forward, 1.0, 0.0)
         self._bind_hold_button(backward, -0.6, 0.0)
         self._bind_hold_button(left_turn, 0.0, 1.0)
         self._bind_hold_button(right_turn, 0.0, -1.0)
         stop.clicked.connect(self.stop_motion)
-        right.addWidget(manual_group)
+        right.insertWidget(1, manual_group)
 
-        self.emergency_button = QPushButton("긴급 정지")
-        self.emergency_button.setMinimumHeight(52)
-        self.emergency_button.setStyleSheet(
-            "QPushButton{background:#c62828;color:white;font-size:18px;font-weight:bold;}"
-            "QPushButton:pressed{background:#8e0000;}"
-        )
+        self.emergency_button = QPushButton("긴급 정지   EMERGENCY STOP")
+        self.emergency_button.setObjectName("EmergencyButton")
+        self.emergency_button.setMinimumHeight(58)
         self.emergency_button.clicked.connect(self.emergency_stop)
-        right.addWidget(self.emergency_button)
+        right_column.addWidget(self.emergency_button)
+        right.addStretch(1)
 
-        status_group = QGroupBox("로봇 상태")
-        status_form = QFormLayout(status_group)
-        self.robot_address_label = QLabel("-")
-        self.lidar_label = QLabel("-")
-        self.distance_label = QLabel("-")
-        self.avoid_label = QLabel("-")
-        self.applied_label = QLabel("-")
-        status_form.addRow("현재 로봇 주소", self.robot_address_label)
-        status_form.addRow("LiDAR", self.lidar_label)
-        status_form.addRow("정면 거리", self.distance_label)
-        status_form.addRow("회피 상태", self.avoid_label)
-        status_form.addRow("실제 명령", self.applied_label)
-        right.addWidget(status_group)
-
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(300)
-        right.addWidget(self.log, 1)
+    @staticmethod
+    def _metric_card(label: str, value: QLabel) -> QFrame:
+        card = QFrame()
+        card.setProperty("card", "metric")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(13, 10, 13, 11)
+        layout.setSpacing(3)
+        caption = QLabel(label)
+        caption.setObjectName("MetricCaption")
+        value.setObjectName("MetricValue")
+        value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(caption)
+        layout.addWidget(value)
+        return card
 
     @staticmethod
     def _double_spin(
@@ -209,6 +353,83 @@ class MainWindow(QMainWindow):
         button.pressed.connect(lambda: self.manual_motion(linear_scale, angular_scale))
         button.released.connect(self.stop_motion)
 
+    @staticmethod
+    def _direction_for_key(key: int) -> str | None:
+        mapping = {
+            int(Qt.Key.Key_Up): "forward",
+            int(Qt.Key.Key_W): "forward",
+            int(Qt.Key.Key_Down): "backward",
+            int(Qt.Key.Key_S): "backward",
+            int(Qt.Key.Key_Left): "left",
+            int(Qt.Key.Key_A): "left",
+            int(Qt.Key.Key_Right): "right",
+            int(Qt.Key.Key_D): "right",
+        }
+        return mapping.get(key)
+
+    def _keyboard_control_blocked(self) -> bool:
+        focus = QApplication.focusWidget()
+        return isinstance(
+            focus,
+            (QLineEdit, QAbstractSpinBox, QComboBox, QPlainTextEdit),
+        )
+
+    def _apply_keyboard_motion(self) -> None:
+        directions = {
+            direction
+            for key in self._manual_keys
+            if (direction := self._direction_for_key(key)) is not None
+        }
+        linear_scale = 0.0
+        if "forward" in directions and "backward" not in directions:
+            linear_scale = 1.0
+        elif "backward" in directions and "forward" not in directions:
+            linear_scale = -0.6
+
+        angular_scale = 0.0
+        if "left" in directions and "right" not in directions:
+            angular_scale = 1.0
+        elif "right" in directions and "left" not in directions:
+            angular_scale = -1.0
+
+        if linear_scale == 0.0 and angular_scale == 0.0:
+            self.stop_motion()
+        else:
+            self.manual_motion(linear_scale, angular_scale)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        key = int(event.key())
+        direction = self._direction_for_key(key)
+        if key == int(Qt.Key.Key_Space) and not self._keyboard_control_blocked():
+            self._manual_keys.clear()
+            self.stop_motion()
+            event.accept()
+            return
+        if direction is None or self._keyboard_control_blocked():
+            super().keyPressEvent(event)
+            return
+        if not event.isAutoRepeat():
+            self._manual_keys.add(key)
+            self._apply_keyboard_motion()
+        event.accept()
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
+        key = int(event.key())
+        if self._direction_for_key(key) is None or key not in self._manual_keys:
+            super().keyReleaseEvent(event)
+            return
+        if not event.isAutoRepeat():
+            self._manual_keys.discard(key)
+            self._apply_keyboard_motion()
+        event.accept()
+
+    def event(self, event: QEvent) -> bool:
+        manual_keys = getattr(self, "_manual_keys", None)
+        if event.type() == QEvent.Type.WindowDeactivate and manual_keys:
+            manual_keys.clear()
+            self.stop_motion()
+        return super().event(event)
+
     def _load_settings(self) -> None:
         self.host_edit.setText(self.settings_store.value("host", ""))
         self.command_port.setValue(int(self.settings_store.value("command_port", 9999)))
@@ -216,11 +437,11 @@ class MainWindow(QMainWindow):
             self.settings_store.value("robot_host", "raspberrypi.local")
         )
         self.token_edit.setText(self.settings_store.value("token", ""))
-        source = self.settings_store.value("camera_source", "local")
+        source = self.settings_store.value("camera_source", "robot")
         saved_camera_url = self.settings_store.value("camera_url", "")
         # Migrate the old broken state where "network" was saved with no URL.
         if source == "network" and not str(saved_camera_url).strip():
-            source = "local"
+            source = "robot"
         source_index = self.camera_source.findData(source)
         self.camera_source.setCurrentIndex(max(source_index, 0))
         self.camera_index.setValue(int(self.settings_store.value("camera_index", 0)))
@@ -246,9 +467,10 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue("nav_yaw", self.nav_yaw.value())
 
     def _update_camera_fields(self) -> None:
-        local_camera = self.camera_source.currentData() == "local"
+        source = self.camera_source.currentData()
+        local_camera = source == "local"
         self.camera_index.setEnabled(local_camera)
-        self.camera_url.setEnabled(not local_camera)
+        self.camera_url.setEnabled(source == "network")
 
     def choose_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -283,53 +505,67 @@ class MainWindow(QMainWindow):
         self.robot_host_edit.setEnabled(False)
         self.token_edit.setEnabled(False)
 
+    def _auto_connect(self) -> None:
+        if self.client is not None:
+            return
+        if not self.host_edit.text().strip():
+            self.append_log("Ubuntu VM IP가 없어 자동 연결을 건너뜁니다")
+            return
+        self.append_log("저장된 Ubuntu VM으로 자동 연결합니다")
+        self.toggle_connection()
+
     def disconnect_robot(self) -> None:
+        self._manual_keys.clear()
+        client = self.client
+        if client is not None:
+            # Latch emergency stop before waiting for camera/navigation shutdown.
+            client.stop()
         self.stop_vision()
         self.stop_navigation()
-        if self.client is not None:
-            self.client.stop()
-            if self.client.wait(3000):
-                self.client.deleteLater()
+        if client is not None:
+            if client.wait(3000):
+                client.deleteLater()
             else:
                 self.append_log("통신 작업자가 종료 대기 중입니다")
         self.client = None
         self.gateway_connected = False
         self.robot_connected = False
+        self.current_robot_ip = ""
         self._last_robot_state = None
-        self.connect_button.setText("연결")
+        self.connect_button.setText("서버에 연결")
         self.host_edit.setEnabled(True)
         self.command_port.setEnabled(True)
         self.robot_host_edit.setEnabled(True)
         self.token_edit.setEnabled(True)
-        self.connection_label.setText("연결 안 됨")
+        self._set_connection_status("●  연결 안 됨", "offline")
         self.robot_address_label.setText("-")
 
     def on_connection_changed(self, connected: bool, message: str) -> None:
         self.gateway_connected = connected
         if not connected:
             self.robot_connected = False
-        color = "#2e7d32" if connected else "#b71c1c"
-        self.connection_label.setText(message)
-        self.connection_label.setStyleSheet(f"color:{color};font-weight:bold;")
+            self.current_robot_ip = ""
+        state = "online" if connected else "offline"
+        self._set_connection_status(f"●  {message}", state)
         self.append_log(message)
 
     def on_status(self, status: dict) -> None:
         relay_status = "robot_connected" in status
         if relay_status:
             self.robot_connected = bool(status.get("robot_connected"))
-            robot_ip = str(status.get("robot_ip") or "탐색 중")
+            resolved_robot_ip = str(status.get("robot_ip") or "").strip()
+            self.current_robot_ip = resolved_robot_ip if self.robot_connected else ""
+            robot_ip = resolved_robot_ip or "탐색 중"
             method = str(status.get("discovery_method") or "-")
             self.robot_address_label.setText(f"{robot_ip} ({method})")
             if self.robot_connected:
-                self.connection_label.setText(f"VM · 로봇 {robot_ip} 연결됨")
-                self.connection_label.setStyleSheet(
-                    "color:#2e7d32;font-weight:bold;"
+                self._set_connection_status(
+                    f"●  VM · 로봇 {robot_ip} 연결됨", "online"
                 )
                 self.lidar_label.setText("로봇 내부 안전제어")
             else:
-                self.connection_label.setText("VM 연결됨 · 로봇 탐색/재연결 중")
-                self.connection_label.setStyleSheet(
-                    "color:#ef6c00;font-weight:bold;"
+                self._set_connection_status(
+                    "●  VM 연결됨 · 로봇 재연결 중", "waiting"
                 )
                 self.lidar_label.setText("로봇 연결 안 됨")
             state = (self.robot_connected, robot_ip)
@@ -353,6 +589,13 @@ class MainWindow(QMainWindow):
             f"linear={float(status.get('applied_linear', 0.0)):.2f} · "
             f"angular={float(status.get('applied_angular', 0.0)):.2f}"
         )
+
+    def _set_connection_status(self, text: str, state: str) -> None:
+        self.connection_label.setText(text)
+        self.connection_label.setProperty("state", state)
+        style = self.connection_label.style()
+        style.unpolish(self.connection_label)
+        style.polish(self.connection_label)
 
     def toggle_follow(self, checked: bool) -> None:
         if checked:
@@ -396,6 +639,18 @@ class MainWindow(QMainWindow):
         )
         if self.camera_source.currentData() == "local":
             camera_input: int | str = self.camera_index.value()
+        elif self.camera_source.currentData() == "robot":
+            if not self.robot_connected or not self.current_robot_ip:
+                self.perception_button.setChecked(False)
+                self.follow_button.setChecked(False)
+                QMessageBox.warning(
+                    self,
+                    "Perception",
+                    "먼저 Ubuntu VM과 로봇에 연결하세요.",
+                )
+                return
+            camera_input = f"http://{self.current_robot_ip}:8080/stream.mjpg"
+            self.append_log(f"로봇 카메라 연결: {camera_input}")
         else:
             camera_input = self.camera_url.text().strip()
             if not camera_input:
@@ -422,11 +677,11 @@ class MainWindow(QMainWindow):
         self.follow_active = mode == "follow"
         self.perception_button.setChecked(mode == "perception")
         self.perception_button.setText(
-            "Perception 중지" if mode == "perception" else "Perception 시작"
+            "비전 인식 중지" if mode == "perception" else "비전 인식 시작"
         )
         self.follow_button.setChecked(mode == "follow")
         self.follow_button.setText(
-            "Follow Me 중지" if mode == "follow" else "Follow Me 시작"
+            "Follow Me 중지" if mode == "follow" else "Follow Me"
         )
         if mode == "perception" and self.client is not None:
             self.client.set_command(0.0, 0.0)
@@ -450,9 +705,9 @@ class MainWindow(QMainWindow):
             else:
                 worker.finished.connect(worker.deleteLater)
         self.perception_button.setChecked(False)
-        self.perception_button.setText("Perception 시작")
+        self.perception_button.setText("비전 인식 시작")
         self.follow_button.setChecked(False)
-        self.follow_button.setText("Follow Me 시작")
+        self.follow_button.setText("Follow Me")
 
     # Backwards-compatible name used by the connection shutdown path.
     def stop_follow(self) -> None:
@@ -537,7 +792,7 @@ class MainWindow(QMainWindow):
         process = self.navigation_process
         self.navigation_process = None
         self.navigation_button.setChecked(False)
-        self.navigation_button.setText("Navigation 시작")
+        self.navigation_button.setText("Navigation")
         self.append_log(f"Navigation 종료 (code={exit_code})")
         if process is not None:
             process.deleteLater()
@@ -556,7 +811,7 @@ class MainWindow(QMainWindow):
                 self.navigation_process = None
                 process.deleteLater()
         self.navigation_button.setChecked(False)
-        self.navigation_button.setText("Navigation 시작")
+        self.navigation_button.setText("Navigation")
 
     def stop_all_features(self) -> None:
         self.stop_vision()
@@ -588,6 +843,7 @@ class MainWindow(QMainWindow):
             self.client.set_command(0.0, 0.0)
 
     def emergency_stop(self) -> None:
+        self._manual_keys.clear()
         self.stop_vision()
         self.stop_navigation()
         if self.client is not None:
@@ -614,17 +870,21 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._save_settings()
+        self.disconnect_robot()
         for worker in self.findChildren(VisionWorker):
             worker.stop()
             worker.wait(3000)
-        self.stop_navigation()
-        self.disconnect_robot()
         event.accept()
 
 
 def main() -> None:
     application = QApplication(sys.argv)
     application.setApplicationName("Robot Control v2")
+    application.setStyle("Fusion")
+    font = QFont()
+    font.setPointSize(11)
+    application.setFont(font)
+    application.setStyleSheet(APP_STYLESHEET)
     window = MainWindow()
     window.show()
     raise SystemExit(application.exec())

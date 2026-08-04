@@ -49,7 +49,18 @@ class RobotLocatorTests(unittest.TestCase):
         locator = RobotLocator(robot_mac="dc:a6:32:01:02:03")
         locator.set_runtime_ip("172.30.1.99", "gui-hostname")
         resolution = locator.resolve(force=True)
-        self.assertEqual((resolution.ip, resolution.method), ("172.30.1.99", "gui-hostname"))
+        self.assertEqual(
+            (resolution.ip, resolution.method), ("172.30.1.99", "gui-hostname")
+        )
+
+    def test_runtime_hint_can_survive_transient_bridge_disconnect(self) -> None:
+        locator = RobotLocator(robot_mac="dc:a6:32:01:02:03")
+        locator.set_runtime_ip("172.30.1.18", "gui-hostname")
+        locator.invalidate(clear_runtime=False)
+        resolution = locator.resolve(force=True)
+        self.assertEqual(
+            (resolution.ip, resolution.method), ("172.30.1.18", "gui-hostname")
+        )
 
 
 class GatewayProtocolTests(unittest.TestCase):
@@ -62,7 +73,7 @@ class GatewayProtocolTests(unittest.TestCase):
     def test_emergency_stop_becomes_zero_velocity(self) -> None:
         self.assertEqual(
             legacy_payload({"type": "emergency_stop"}),
-            {"linear": 0.0, "angular": 0.0},
+            {"linear": 0.0, "angular": 0.0, "emergency_stop": 1},
         )
 
     def test_relay_connects_and_sends_to_legacy_robot(self) -> None:

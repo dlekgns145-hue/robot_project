@@ -1,4 +1,6 @@
 .env
 desktop_gui/.venv/
+.DS_Store
+.ruff_cache/
 **/__pycache__/
 *.pyc

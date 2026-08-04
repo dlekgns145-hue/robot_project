@@ -36,7 +36,7 @@ def legacy_payload(payload: dict[str, Any]) -> dict[str, float | int]:
     """Translate the v2 GUI protocol to the existing Yahboom bridge protocol."""
     command_type = payload.get("type", "command")
     if command_type == "emergency_stop":
-        return {"linear": 0.0, "angular": 0.0}
+        return {"linear": 0.0, "angular": 0.0, "emergency_stop": 1}
     if command_type not in {"command", "ping"}:
         raise ValueError(f"unsupported command type: {command_type}")
 
@@ -121,7 +121,9 @@ class RobotRelay:
             except (OSError, RuntimeError, ValueError) as error:
                 with self.lock:
                     self.last_error = str(error)
-                self._shutdown_event.wait(ROBOT_RECONNECT_INTERVAL)
+                self.locator.invalidate(clear_runtime=True)
+                self._reconnect_event.wait(ROBOT_RECONNECT_INTERVAL)
+                self._reconnect_event.clear()
 
     def send(self, command: dict[str, float | int]) -> bool:
         encoded = json.dumps(command, separators=(",", ":")).encode() + b"\n"
@@ -140,14 +142,17 @@ class RobotRelay:
                 return True
             except OSError as error:
                 self.last_error = str(error)
-                self._close_unlocked(invalidate=True)
+                # A bridge restart does not imply that the robot's DHCP IP changed.
+                # Preserve the authenticated GUI hint for an immediate reconnect.
+                self._close_unlocked(invalidate=False)
+                self.locator.invalidate(clear_runtime=False)
                 self._reconnect_event.set()
                 self.applied_linear = 0.0
                 self.applied_angular = 0.0
                 return False
 
     def safe_stop(self) -> None:
-        stop_message = b'{"linear":0.0,"angular":0.0}\n'
+        stop_message = b'{"linear":0.0,"angular":0.0,"emergency_stop":1}\n'
         with self.lock:
             if self.connection is not None:
                 try:

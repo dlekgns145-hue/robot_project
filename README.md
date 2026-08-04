@@ -18,10 +18,10 @@ robot_project/
 ├── slam/
 │   ├── map.yaml               # STEP 2 완료 후 생성됨
 │   └── map.pgm                # STEP 2 완료 후 생성됨
-├── local_test/                # 로봇 연결 없이 노트북에서 미리 검증하는 스크립트
-│   ├── webcam_follow_test.py      # 실제 사용 코드 (YOLO 기반, 확정)
-│   ├── mediapipe_follow_test.py   # MediaPipe 버전 (참고용/백업, 현재는 미사용)
-│   └── requirements.txt
+├── robot_docker/             # Raspberry Pi 고정 이름 Docker 런타임
+│   ├── robot_cmd_bridge.py       # TCP 명령·LiDAR 안전제어
+│   └── camera_stream_server.py   # 로봇 카메라 MJPEG 서버
+├── ubuntu_v2/               # 데스크톱 GUI·VM gateway·테스트
 ├── resource/robot_project
 ├── package.xml
 ├── setup.py

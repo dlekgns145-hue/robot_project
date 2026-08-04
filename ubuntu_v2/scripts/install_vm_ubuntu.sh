@@ -22,16 +22,23 @@ install -d "${TARGET_DIR}"
 cp -a "${SOURCE_DIR}/." "${TARGET_DIR}/"
 
 if [[ ! -f "${TARGET_DIR}/.env" ]]; then
-    cp "${TARGET_DIR}/.env.example" "${TARGET_DIR}/.env"
-    echo "Created ${TARGET_DIR}/.env. Verify VM/robot settings before starting." >&2
+    if [[ -f "${TARGET_DIR}/.env.robot-ready" ]]; then
+        cp "${TARGET_DIR}/.env.robot-ready" "${TARGET_DIR}/.env"
+        echo "Created ${TARGET_DIR}/.env from the robot-ready configuration."
+    else
+        cp "${TARGET_DIR}/.env.example" "${TARGET_DIR}/.env"
+        echo "Created ${TARGET_DIR}/.env. Verify robot settings." >&2
+    fi
 fi
 
 install -m 0644 \
     "${TARGET_DIR}/systemd/robot-control-v2.service" \
     /etc/systemd/system/robot-control-v2.service
 systemctl daemon-reload
-systemctl enable robot-control-v2.service
+cd "${TARGET_DIR}"
+docker compose config >/dev/null
+docker compose build gateway
+systemctl enable --now robot-control-v2.service
 
 echo "Ubuntu VM robot gateway installed in ${TARGET_DIR}."
-echo "Set ROBOT_MAC and COMMAND_TOKEN in ${TARGET_DIR}/.env."
-echo "Build the gateway image, then start robot-control-v2."
+echo "The gateway will now start automatically whenever Ubuntu boots."
