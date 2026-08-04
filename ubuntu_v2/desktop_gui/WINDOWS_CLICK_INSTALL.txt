@@ -1,0 +1,26 @@
+ROBOT CONTROL V2 - WINDOWS
+==========================
+
+First installation or reinstall
+--------------------------------
+1. Extract the entire ZIP file.
+2. Open robot_project\ubuntu_v2\desktop_gui.
+3. Double-click 1_INSTALL_AND_RUN.bat.
+4. Keep the installer window open until the GUI starts.
+
+Run after installation
+----------------------
+Double-click run_gui_windows.vbs.
+
+GUI connection settings
+-----------------------
+Ubuntu VM IP : 172.30.1.78
+Command port : 9999
+Robot address: 172.30.1.18
+Control token: use the existing control token
+
+Notes
+-----
+- Python 3.10 or newer must be installed from python.org.
+- If Windows Defender asks, allow Python on Private networks only.
+- Disconnect the GUI on another PC before taking control.
