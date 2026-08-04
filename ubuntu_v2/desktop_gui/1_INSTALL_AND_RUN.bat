@@ -21,5 +21,5 @@ if errorlevel 1 (
 
 echo.
 echo Installation complete. Starting Robot Control v2...
-start "" wscript.exe "%~dp0run_gui_windows.vbs"
-exit /b 0
+call "%~dp0run_gui_windows.bat"
+exit /b %errorlevel%
