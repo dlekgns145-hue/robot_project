@@ -18,7 +18,7 @@ robot_cmd_bridge.py - 로봇(Docker 컨테이너) 안에서 실행하는 파일
     로봇 Docker 컨테이너 (이 스크립트)
         --- rclpy로 /cmd_vel 발행 (0.1초 타이머, 단일 지점) --->
         --- rclpy로 /servo_s1(좌우 카메라 팬) 발행 --->
-    base_node_X3 / YB_Car_Node
+    micro-ROS Agent / MCU command subscriber
 
 실행:
     systemctl start robot-control-bridge
@@ -57,6 +57,7 @@ BACKUP_MAX_TIME_SEC = 3.0
 BACKUP_SPEED = -0.20
 
 LIDAR_MIN_VALID_RANGE = 0.02
+LIDAR_STALE_SEC = 2.0
 
 SMOOTHING_WINDOW = 5
 
@@ -85,6 +86,7 @@ class CmdBridgeNode(Node):
 
         self.front_blocked = False
         self.front_min_dist = 10.0
+        self._last_scan_at = 0.0
 
         self.left_history = deque(maxlen=SMOOTHING_WINDOW)
         self.right_history = deque(maxlen=SMOOTHING_WINDOW)
@@ -96,14 +98,57 @@ class CmdBridgeNode(Node):
 
         self._last_servo_pan_sent = None
         self._tilt_set = False
+        self._last_runtime_health = None
 
         self.scan_sub = self.create_subscription(
             LaserScan, "/scan", self.scan_callback, 10
         )
         self.control_timer = self.create_timer(0.1, self.control_loop)
         self.create_timer(1.0, self._set_initial_tilt_once)
+        self.create_timer(2.0, self._report_runtime_health)
 
         self.get_logger().info("cmd_bridge_node 시작됨 (갇힘 감지 포함)")
+
+    def _report_runtime_health(self):
+        cmd_subscribers = self.count_subscribers("/cmd_vel")
+        scan_publishers = self.count_publishers("/scan")
+        scan_age = (
+            time.monotonic() - self._last_scan_at
+            if self._last_scan_at > 0.0
+            else float("inf")
+        )
+        scan_fresh = scan_age <= LIDAR_STALE_SEC
+        health = (cmd_subscribers, scan_publishers, scan_fresh)
+        if health == self._last_runtime_health:
+            return
+        self._last_runtime_health = health
+
+        if cmd_subscribers == 0:
+            self.get_logger().error(
+                "모터 제어 연결 없음: /cmd_vel subscriber=0. "
+                "micro-ROS Agent와 MCU serial session을 확인하세요."
+            )
+        elif cmd_subscribers > 1:
+            self.get_logger().warn(
+                f"중복 모터 subscriber 감지: /cmd_vel subscriber={cmd_subscribers}"
+            )
+        else:
+            self.get_logger().info("모터 제어 연결 정상: /cmd_vel subscriber=1")
+
+        if scan_publishers == 0:
+            self.get_logger().warn(
+                "LiDAR 연결 없음: /scan publisher=0. 장애물 회피 데이터가 없습니다."
+            )
+        elif not scan_fresh:
+            age_text = "수신 이력 없음" if math.isinf(scan_age) else f"{scan_age:.1f}초 지연"
+            self.get_logger().warn(
+                f"LiDAR 노드는 있으나 /scan 데이터가 없습니다: {age_text}. "
+                "ESP32 radar publish와 Yahboom bringup을 확인하세요."
+            )
+        else:
+            self.get_logger().info(
+                f"LiDAR 데이터 정상: /scan publisher={scan_publishers}"
+            )
 
     def _set_initial_tilt_once(self):
         if self._tilt_set:
@@ -115,6 +160,7 @@ class CmdBridgeNode(Node):
         self._tilt_set = True
 
     def scan_callback(self, msg: LaserScan):
+        self._last_scan_at = time.monotonic()
         angle_min = msg.angle_min
         angle_increment = msg.angle_increment
         front_range_rad = math.radians(FRONT_ANGLE_RANGE_DEG)
@@ -332,11 +378,11 @@ def start_socket_server(node: CmdBridgeNode):
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen(1)
-    print(f"cmd_bridge ready. listening on {PORT}")
+    print(f"cmd_bridge ready. listening on {PORT}", flush=True)
 
     while True:
         conn, addr = server.accept()
-        print(f"클라이언트 연결됨: {addr}")
+        print(f"클라이언트 연결됨: {addr}", flush=True)
         buffer = ""
         try:
             while True:
@@ -358,11 +404,11 @@ def start_socket_server(node: CmdBridgeNode):
                             bool(cmd.get("emergency_stop", False)),
                         )
                     except json.JSONDecodeError:
-                        print(f"잘못된 명령 무시: {line}")
+                        print(f"잘못된 명령 무시: {line}", flush=True)
         except ConnectionResetError:
             pass
         finally:
-            print(f"클라이언트 연결 종료: {addr}")
+            print(f"클라이언트 연결 종료: {addr}", flush=True)
             node.emergency_stop()
             conn.close()
 

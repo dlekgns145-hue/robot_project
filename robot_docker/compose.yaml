@@ -3,6 +3,9 @@ name: robot-control-rpi
 x-ros-service: &ros-service
   image: robot-control-rpi:latest
   network_mode: host
+  # Fast DDS can otherwise select shared-memory transport while Docker keeps
+  # each container in a different IPC namespace.
+  ipc: host
   restart: unless-stopped
   init: true
   environment:
@@ -18,15 +21,25 @@ services:
     image: microros/micro-ros-agent:humble
     container_name: robot-microros-agent
     network_mode: host
+    ipc: host
     restart: unless-stopped
     init: true
+    # The agent is the only process that owns the MCU serial port. base_node
+    # communicates with it over ROS 2 and must not open the same device.
     privileged: true
     environment:
       ROS_DOMAIN_ID: "20"
+    devices:
+      - "${ROBOT_SERIAL_DEVICE:-/dev/ttyUSB0}:/dev/robot-controller"
     volumes:
-      - /dev:/dev
       - /dev/shm:/dev/shm
-    command: ["serial", "--dev", "/dev/ttyUSB0", "-b", "921600", "-v4"]
+    command:
+      - serial
+      - --dev
+      - /dev/robot-controller
+      - -b
+      - "${ROBOT_SERIAL_BAUD:-921600}"
+      - -v4
     logging:
       driver: json-file
       options:
@@ -41,7 +54,10 @@ services:
       dockerfile: Dockerfile
       args:
         BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
-    command: ["base"]
+    # Official Yahboom startup. This includes the base processing and the
+    # scan/odom relay/fix nodes used by the MS200 LiDAR pipeline. The raw
+    # radar data still originates on the micro-ROS control board.
+    command: ["bringup"]
     depends_on:
       - agent
 

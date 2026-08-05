@@ -313,6 +313,57 @@ docker compose ps
 docker compose logs --tail=100
 ```
 
+로봇 MCU 시리얼은 `robot-microros-agent`만 소유합니다. `robot-base-node`는
+`/odom_raw` 같은 ROS 토픽을 소비하므로 같은 시리얼 장치를 base 컨테이너에도
+마운트하면 안 됩니다. 설치 스크립트는 CP210x의 `/dev/serial/by-id` 경로를
+자동으로 찾아 `robot-control-deploy/.env`에 저장하고 컨테이너 안의
+`/dev/robot-controller`로 명시적으로 전달합니다.
+
+수동 실행할 때는 `.env.example`을 참고하여 실제 장치 경로를 지정할 수 있습니다.
+
+```dotenv
+ROBOT_SERIAL_DEVICE=/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+ROBOT_SERIAL_BAUD=921600
+```
+
+Agent 재생성 후 로그가 `running... fd: 3`에서 멈추면 MCU의 RESET 버튼을 한 번
+눌러야 합니다. 정상일 때는 `create_client`, `session established`,
+`create_subscriber`가 이어서 출력됩니다.
+
+```bash
+docker logs -f robot-microros-agent
+docker logs -f robot-command-bridge
+```
+
+`robot-command-bridge`는 `/cmd_vel` subscriber가 없거나 `/scan` publisher가
+없으면 상태 변화 시 오류를 남깁니다. 기존 `yahboom_ros_main` 및
+`smart_ros2.sh`를 새 Compose 구성과 동시에 실행하지 않습니다.
+
+### Yahboom MS200 LiDAR 실행 구조
+
+Yahboom 공식 MicroROS-Car-Pi5 구성에는 별도의 USB LiDAR 드라이버 실행 명령이
+없습니다. 제어보드가 micro-ROS Agent에 연결된 뒤 radar/IMU 원시 데이터를
+발행하고, 공식 실행 명령인 아래 bringup이 base 처리와 scan/odom 후처리 노드를
+시작합니다.
+
+```bash
+ros2 launch yahboomcar_bringup yahboomcar_bringup_launch.py
+```
+
+새 `robot-base-node`는 단독 `base_node_X3` 대신 위 bringup을 실행합니다. 설치된
+Yahboom 이미지에 bringup 패키지가 없을 때만 `base_node_X3`로 자동 대체합니다.
+따라서 bringup 실행 후에도 `/scan` 메시지가 오지 않으면 별도 Docker 장치 마운트
+문제가 아니라 ESP32의 radar publish 상태를 확인해야 합니다.
+
+```bash
+docker logs --tail=100 robot-base-node
+docker exec robot-base-node bash -lc \
+  'source /opt/ros/humble/setup.bash; ros2 topic hz /scan'
+```
+
+브리지는 이제 `/scan` publisher 존재 여부만 보지 않고 최근 2초 내 실제
+`LaserScan` 메시지가 수신됐는지도 확인합니다.
+
 ## 7. GUI 실행
 
 Windows 설치:

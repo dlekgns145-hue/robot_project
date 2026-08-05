@@ -8,3 +8,4 @@ install/
 log/
 *.egg-info/
 .vscode/
+robot_docker/.env
