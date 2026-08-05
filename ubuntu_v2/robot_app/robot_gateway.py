@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from config import env_float, env_int
+from operations_store import OperationsStore
 from robot_locator import Resolution, RobotLocator
 
 
@@ -24,6 +25,11 @@ MAX_ANGULAR_SPEED = env_float("MAX_ANGULAR_SPEED", 0.8)
 ROBOT_PORT = env_int("ROBOT_PORT", 9999)
 ROBOT_CONNECT_TIMEOUT = env_float("ROBOT_CONNECT_TIMEOUT_SEC", 1.5)
 ROBOT_RECONNECT_INTERVAL = env_float("ROBOT_RECONNECT_INTERVAL_SEC", 10.0)
+ROBOT_HEARTBEAT_INTERVAL = env_float("ROBOT_HEARTBEAT_INTERVAL_SEC", 1.0)
+OPERATIONS_DB_PATH = os.getenv(
+    "OPERATIONS_DB_PATH", "/var/lib/robot-control-v2/operations.sqlite3"
+)
+ROBOT_NAME = os.getenv("ROBOT_NAME", "Yahboom Robot 1")
 
 STOP_EVENT = threading.Event()
 
@@ -53,8 +59,11 @@ def legacy_payload(payload: dict[str, Any]) -> dict[str, float | int]:
 
 
 class RobotRelay:
-    def __init__(self, locator: RobotLocator) -> None:
+    def __init__(
+        self, locator: RobotLocator, operations: OperationsStore | None = None
+    ) -> None:
         self.locator = locator
+        self.operations = operations
         self.lock = threading.Lock()
         self.connection: socket.socket | None = None
         self.resolution: Resolution | None = None
@@ -70,12 +79,18 @@ class RobotRelay:
         self._worker.start()
 
     def set_ip_hint(self, value: str) -> None:
+        disconnected = False
         with self.lock:
             previous_ip = None if self.resolution is None else self.resolution.ip
         self.locator.set_runtime_ip(value, "gui-hostname")
         if previous_ip and previous_ip != value:
             with self.lock:
                 self._close_unlocked(invalidate=False)
+                disconnected = True
+        if disconnected and self.operations is not None:
+            self.operations.set_robot_state(
+                False, ip=previous_ip or "", detail="robot IP changed"
+            )
         self._reconnect_event.set()
 
     def _close_unlocked(self, *, invalidate: bool) -> None:
@@ -94,7 +109,9 @@ class RobotRelay:
             with self.lock:
                 connected = self.connection is not None
             if connected:
-                self._reconnect_event.wait(1.0)
+                if time.monotonic() - self.last_sent_at >= ROBOT_HEARTBEAT_INTERVAL:
+                    self._send_idle_heartbeat()
+                self._reconnect_event.wait(0.25)
                 self._reconnect_event.clear()
                 continue
 
@@ -106,6 +123,12 @@ class RobotRelay:
                 connection.settimeout(ROBOT_CONNECT_TIMEOUT)
                 connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                if hasattr(socket, "TCP_KEEPIDLE"):
+                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+                if hasattr(socket, "TCP_KEEPINTVL"):
+                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+                if hasattr(socket, "TCP_KEEPCNT"):
+                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
                 with self.lock:
                     if self._shutdown_event.is_set():
                         connection.close()
@@ -113,17 +136,60 @@ class RobotRelay:
                     self.connection = connection
                     self.resolution = resolution
                     self.last_error = ""
+                    self.last_sent_at = time.monotonic()
                 print(
                     f"robot bridge connected: {resolution.ip}:{ROBOT_PORT} "
                     f"via {resolution.method}",
                     flush=True,
                 )
+                if self.operations is not None:
+                    self.operations.set_robot_state(
+                        True,
+                        ip=resolution.ip,
+                        detail=f"connected via {resolution.method}",
+                    )
             except (OSError, RuntimeError, ValueError) as error:
                 with self.lock:
                     self.last_error = str(error)
+                if self.operations is not None:
+                    self.operations.set_robot_state(
+                        False, detail=f"connection failed: {error}"
+                    )
                 self.locator.invalidate(clear_runtime=True)
                 self._reconnect_event.wait(ROBOT_RECONNECT_INTERVAL)
                 self._reconnect_event.clear()
+
+    def _send_idle_heartbeat(self) -> None:
+        """Keep availability tracking alive without moving the robot."""
+        error: OSError | None = None
+        ip = ""
+        with self.lock:
+            if self.connection is None:
+                return
+            if time.monotonic() - self.last_sent_at < ROBOT_HEARTBEAT_INTERVAL:
+                return
+            try:
+                self.connection.sendall(b'{"linear":0.0,"angular":0.0}\n')
+                self.last_sent_at = time.monotonic()
+                if self.operations is not None:
+                    resolution = self.resolution
+                    self.operations.set_robot_state(
+                        True, ip="" if resolution is None else resolution.ip
+                    )
+                return
+            except OSError as caught:
+                error = caught
+                ip = "" if self.resolution is None else self.resolution.ip
+                self.last_error = str(caught)
+                self._close_unlocked(invalidate=False)
+                self.locator.invalidate(clear_runtime=False)
+                self._reconnect_event.set()
+                self.applied_linear = 0.0
+                self.applied_angular = 0.0
+        if error is not None and self.operations is not None:
+            self.operations.set_robot_state(
+                False, ip=ip, detail=f"heartbeat lost: {error}"
+            )
 
     def send(self, command: dict[str, float | int]) -> bool:
         encoded = json.dumps(command, separators=(",", ":")).encode() + b"\n"
@@ -149,6 +215,12 @@ class RobotRelay:
                 self._reconnect_event.set()
                 self.applied_linear = 0.0
                 self.applied_angular = 0.0
+                if self.operations is not None:
+                    self.operations.set_robot_state(
+                        False,
+                        ip="" if self.resolution is None else self.resolution.ip,
+                        detail=f"command connection lost: {error}",
+                    )
                 return False
 
     def safe_stop(self) -> None:
@@ -168,7 +240,14 @@ class RobotRelay:
         self._reconnect_event.set()
         self.safe_stop()
         with self.lock:
+            resolution = self.resolution
             self._close_unlocked(invalidate=False)
+        if self.operations is not None:
+            self.operations.set_robot_state(
+                False,
+                ip="" if resolution is None else resolution.ip,
+                detail="gateway shutdown",
+            )
         self._worker.join(timeout=1.0)
 
     def status(self, sent: bool) -> dict[str, Any]:
@@ -190,7 +269,11 @@ class RobotRelay:
             }
 
 
-def serve_gui(connection: socket.socket, relay: RobotRelay) -> None:
+def serve_gui(
+    connection: socket.socket,
+    relay: RobotRelay,
+    operations: OperationsStore | None = None,
+) -> None:
     connection.settimeout(0.5)
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     buffer = bytearray()
@@ -227,6 +310,13 @@ def serve_gui(connection: socket.socket, relay: RobotRelay) -> None:
                     command = legacy_payload(payload)
                     sent = relay.send(command)
                     response = relay.status(sent)
+                    if operations is not None and "admin_revision" in payload:
+                        try:
+                            client_revision = int(payload["admin_revision"])
+                        except (TypeError, ValueError):
+                            client_revision = -1
+                        if client_revision != operations.revision():
+                            response["operations"] = operations.snapshot()
                 except (json.JSONDecodeError, TypeError, ValueError) as error:
                     response = {"type": "error", "message": str(error)}
                 connection.sendall(
@@ -247,7 +337,16 @@ def main() -> None:
         cache_seconds=env_float("ROBOT_DISCOVERY_CACHE_SEC", 30.0),
         command_timeout=env_float("ROBOT_DISCOVERY_TIMEOUT_SEC", 8.0),
     )
-    relay = RobotRelay(locator)
+    robot_id = os.getenv("ROBOT_ID", "").strip()
+    if not robot_id:
+        robot_id = locator.robot_mac or locator.robot_host or "robot-1"
+    operations = OperationsStore(
+        OPERATIONS_DB_PATH,
+        robot_id=robot_id,
+        robot_name=ROBOT_NAME,
+    )
+    operations.mark_gateway_started()
+    relay = RobotRelay(locator, operations)
     relay.start()
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -264,11 +363,12 @@ def main() -> None:
             print(f"GUI connected: {address}", flush=True)
             with connection:
                 try:
-                    serve_gui(connection, relay)
+                    serve_gui(connection, relay, operations)
                 except (ConnectionError, OSError, ValueError) as error:
                     print(f"GUI disconnected: {error}", flush=True)
 
     relay.shutdown()
+    operations.close()
 
 
 if __name__ == "__main__":

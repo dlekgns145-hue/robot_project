@@ -14,6 +14,7 @@ from PySide6.QtCore import QThread, Signal
 class RobotClient(QThread):
     connection_changed = Signal(bool, str)
     status_received = Signal(dict)
+    operations_received = Signal(dict)
     log_message = Signal(str)
     STOP_BURST_COUNT = 5
 
@@ -24,12 +25,15 @@ class RobotClient(QThread):
         token: str = "",
         robot_host: str = "raspberrypi.local",
         parent: object | None = None,
+        admin_enabled: bool = False,
     ) -> None:
         super().__init__(parent)
         self.host = host
         self.port = port
         self.token = token
         self.robot_host = robot_host.strip()
+        self.admin_enabled = admin_enabled
+        self._admin_revision = -1
         self._robot_ip_hint = ""
         self._robot_resolved_at = 0.0
         self._stop_event = threading.Event()
@@ -110,6 +114,8 @@ class RobotClient(QThread):
             self._robot_resolved_at = time.monotonic()
         if self._robot_ip_hint:
             command["robot_ip_hint"] = self._robot_ip_hint
+        if self.admin_enabled:
+            command["admin_revision"] = self._admin_revision
         return command
 
     def _read_line(
@@ -163,6 +169,13 @@ class RobotClient(QThread):
                         line, buffer = self._read_line(connection, buffer)
                         response = json.loads(line)
                         if response.get("type") == "status":
+                            operations = response.pop("operations", None)
+                            if isinstance(operations, dict):
+                                revision = operations.get("revision")
+                                if revision is not None:
+                                    self._admin_revision = int(revision)
+                                if "robots" in operations:
+                                    self.operations_received.emit(operations)
                             self.status_received.emit(response)
                         elif response.get("type") == "error":
                             raise ValueError(

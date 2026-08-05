@@ -30,11 +30,17 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from control_logic import FollowSettings
+from operations_dashboard import (
+    OperationsDashboardPage,
+    WorkCalendarPage,
+    demo_snapshot,
+)
 from robot_client import RobotClient
 from theme import APP_STYLESHEET
 from vision_worker import VisionWorker
@@ -95,9 +101,16 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.connection_label)
         root_layout.addWidget(header)
 
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setObjectName("MainTabs")
+        root_layout.addWidget(self.main_tabs, 1)
+        control_page = QWidget()
+        control_page.setObjectName("ControlPage")
+        self.main_tabs.addTab(control_page, "실시간 제어")
         body = QHBoxLayout()
+        body.setContentsMargins(0, 4, 0, 0)
         body.setSpacing(18)
-        root_layout.addLayout(body, 1)
+        control_page.setLayout(body)
 
         left = QVBoxLayout()
         left.setSpacing(14)
@@ -321,6 +334,12 @@ class MainWindow(QMainWindow):
         right_column.addWidget(self.emergency_button)
         right.addStretch(1)
 
+        self.operations_page = OperationsDashboardPage()
+        self.operations_page.demo_requested.connect(self._show_operations_demo)
+        self.calendar_page = WorkCalendarPage()
+        self.main_tabs.addTab(self.operations_page, "운영 현황")
+        self.main_tabs.addTab(self.calendar_page, "작업 캘린더")
+
     @staticmethod
     def _metric_card(label: str, value: QLabel) -> QFrame:
         card = QFrame()
@@ -494,9 +513,11 @@ class MainWindow(QMainWindow):
             self.token_edit.text(),
             self.robot_host_edit.text(),
             self,
+            admin_enabled=True,
         )
         self.client.connection_changed.connect(self.on_connection_changed)
         self.client.status_received.connect(self.on_status)
+        self.client.operations_received.connect(self.on_operations_snapshot)
         self.client.log_message.connect(self.append_log)
         self.client.start()
         self.connect_button.setText("연결 해제")
@@ -589,6 +610,16 @@ class MainWindow(QMainWindow):
             f"linear={float(status.get('applied_linear', 0.0)):.2f} · "
             f"angular={float(status.get('applied_angular', 0.0)):.2f}"
         )
+
+    def on_operations_snapshot(self, snapshot: dict) -> None:
+        self.operations_page.update_snapshot(snapshot)
+        self.calendar_page.update_snapshot(snapshot)
+
+    def _show_operations_demo(self) -> None:
+        snapshot = demo_snapshot()
+        self.operations_page.update_snapshot(snapshot, demo=True)
+        self.calendar_page.update_snapshot(snapshot)
+        self.append_log("관리자 운영 페이지 샘플 데이터를 표시합니다")
 
     def _set_connection_status(self, text: str, state: str) -> None:
         self.connection_label.setText(text)

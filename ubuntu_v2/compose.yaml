@@ -37,6 +37,8 @@ services:
     cap_add:
       - NET_RAW
     logging: *service-logging
+    volumes:
+      - ./data:/var/lib/robot-control-v2
     environment:
       COMMAND_PORT: ${COMMAND_PORT:-9999}
       COMMAND_TOKEN: ${COMMAND_TOKEN:-change-this-token}
@@ -53,6 +55,10 @@ services:
       ROBOT_DISCOVERY_TIMEOUT_SEC: ${ROBOT_DISCOVERY_TIMEOUT_SEC:-8}
       ROBOT_CONNECT_TIMEOUT_SEC: ${ROBOT_CONNECT_TIMEOUT_SEC:-1.5}
       ROBOT_RECONNECT_INTERVAL_SEC: ${ROBOT_RECONNECT_INTERVAL_SEC:-10}
+      ROBOT_HEARTBEAT_INTERVAL_SEC: ${ROBOT_HEARTBEAT_INTERVAL_SEC:-1.0}
+      ROBOT_ID: ${ROBOT_ID:-robot-1}
+      ROBOT_NAME: ${ROBOT_NAME:-Yahboom Robot 1}
+      OPERATIONS_DB_PATH: /var/lib/robot-control-v2/operations.sqlite3
     healthcheck:
       test:
         - CMD-SHELL

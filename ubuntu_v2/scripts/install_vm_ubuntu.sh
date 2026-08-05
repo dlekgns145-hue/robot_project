@@ -19,7 +19,18 @@ SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="/opt/robot-control-v2"
 
 install -d "${TARGET_DIR}"
-cp -a "${SOURCE_DIR}/." "${TARGET_DIR}/"
+# Runtime history belongs to the installed gateway. Preserve TARGET_DIR/data
+# when application files are upgraded so an installer rerun cannot overwrite
+# the operations database with a development copy.
+shopt -s dotglob nullglob
+for source_item in "${SOURCE_DIR}"/*; do
+    if [[ "$(basename "${source_item}")" == "data" ]]; then
+        continue
+    fi
+    cp -a "${source_item}" "${TARGET_DIR}/"
+done
+shopt -u dotglob nullglob
+install -d "${TARGET_DIR}/data"
 
 if [[ ! -f "${TARGET_DIR}/.env" ]]; then
     if [[ -f "${TARGET_DIR}/.env.robot-ready" ]]; then

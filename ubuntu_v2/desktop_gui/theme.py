@@ -287,9 +287,141 @@ QPlainTextEdit {
 }
 
 QScrollArea,
-QWidget#ControlPanel {
+QWidget#ControlPanel,
+QWidget#ControlPage {
     background: transparent;
     border: 0;
+}
+
+QWidget#OperationsContent {
+    background: #0c131b;
+}
+
+QTabWidget#MainTabs::pane {
+    background: #0c131b;
+    border: 1px solid #21303d;
+    border-radius: 12px;
+    top: -1px;
+}
+
+QTabWidget#MainTabs QTabBar::tab {
+    min-width: 125px;
+    min-height: 34px;
+    margin-right: 5px;
+    padding: 0 16px;
+    color: #8fa2b4;
+    background: #101821;
+    border: 1px solid #21303d;
+    border-bottom: 0;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    font-weight: 700;
+}
+
+QTabWidget#MainTabs QTabBar::tab:selected {
+    color: #f4f9fd;
+    background: #1976c9;
+    border-color: #2f92e5;
+}
+
+QLabel#PageTitle {
+    color: #f6f9fc;
+    font-size: 22px;
+    font-weight: 750;
+}
+
+QLabel#OperationsSectionTitle {
+    color: #edf5fb;
+    font-size: 15px;
+    font-weight: 700;
+}
+
+QLabel#OperationsHint,
+QLabel#OperationsMetricLabel {
+    color: #71869a;
+    font-size: 11px;
+}
+
+QLabel#OperationsMetricValue {
+    color: #f2f8fc;
+    font-size: 24px;
+    font-weight: 800;
+}
+
+QLabel#OperationsSource {
+    color: #58e0b5;
+    background: #102a25;
+    border: 1px solid #225548;
+    border-radius: 12px;
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+QLabel#OperationsSource[demo="true"] {
+    color: #ffc86b;
+    background: #2b2415;
+    border-color: #5a4923;
+}
+
+QFrame[card="operations"],
+QFrame#CalendarDetail {
+    background: #101821;
+    border: 1px solid #21303d;
+    border-radius: 10px;
+}
+
+QLabel#CalendarTotal {
+    color: #64c4ff;
+    background: #102c3b;
+    border: 1px solid #204c61;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 14px;
+    font-weight: 750;
+}
+
+QTableWidget {
+    color: #dbe7f1;
+    background: #0a1118;
+    alternate-background-color: #0d161f;
+    border: 1px solid #21303d;
+    border-radius: 8px;
+    gridline-color: #1c2a35;
+    selection-background-color: #174d68;
+    selection-color: #ffffff;
+}
+
+QHeaderView::section {
+    color: #91a8ba;
+    background: #131e28;
+    border: 0;
+    border-right: 1px solid #263642;
+    border-bottom: 1px solid #263642;
+    padding: 8px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QCalendarWidget QWidget {
+    alternate-background-color: #101821;
+}
+
+QCalendarWidget QAbstractItemView:enabled {
+    color: #dce8f2;
+    background: #0a1118;
+    selection-background-color: #1976c9;
+    selection-color: #ffffff;
+    border: 1px solid #21303d;
+}
+
+QCalendarWidget QToolButton {
+    color: #e8f2fa;
+    background: #15232e;
+    border: 1px solid #2b4355;
+    border-radius: 6px;
+    margin: 3px;
+    padding: 5px 9px;
 }
 
 QScrollBar:vertical {

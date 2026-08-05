@@ -9,3 +9,4 @@ log/
 *.egg-info/
 .vscode/
 robot_docker/.env
+ubuntu_v2/data/

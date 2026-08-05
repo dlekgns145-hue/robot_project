@@ -386,6 +386,41 @@ cd ubuntu_v2/desktop_gui
 GUI는 저장된 Ubuntu VM IP가 있으면 시작 직후 자동으로 연결하고,
 연결이 끊기면 백그라운드에서 계속 재연결합니다.
 
+### 관리자 운영 현황과 작업 캘린더
+
+관리자용 `desktop_gui`에는 다음 세 페이지가 있습니다.
+
+- `실시간 제어`: 기존 카메라, Follow Me, Navigation, 수동 주행;
+- `운영 현황`: 로봇별 온라인 상태, 최근 작업 세션, 켜짐/꺼짐 감지 로그;
+- `작업 캘린더`: 날짜별 작업 여부와 누적 작업시간.
+
+운영 기록은 GUI 컴퓨터가 아니라 항상 실행되는 Ubuntu gateway의 SQLite에
+저장됩니다. 따라서 관리자 GUI가 꺼져 있어도 gateway가 로봇 연결 변화를
+감지한 시간은 계속 기록됩니다.
+
+```text
+ubuntu_v2/data/operations.sqlite3
+```
+
+Docker 안에서는 `/var/lib/robot-control-v2/operations.sqlite3`로 마운트됩니다.
+gateway 컨테이너를 재생성해도 호스트의 `data` 디렉터리는 보존됩니다. 이 기록의
+켜짐/꺼짐은 물리 전원 센서값이 아니라 Raspberry Pi command bridge의
+온라인/오프라인 감지 시각입니다.
+
+로봇 표시 이름과 영구 식별자는 `.env`에서 설정합니다.
+
+```dotenv
+ROBOT_ID=yahboom-pi5-01
+ROBOT_NAME=Yahboom Pi5 Robot 1
+```
+
+현재 gateway는 한 로봇을 관리하지만 DB와 관리자 표는 여러 `ROBOT_ID`를
+수용할 수 있는 형태입니다. 여러 로봇 동시 관리는 gateway의 relay 인스턴스를
+로봇별로 확장하는 후속 작업이 필요합니다.
+
+실물 로봇 없이 화면을 확인하려면 `운영 현황` 탭의
+`샘플 데이터 미리보기`를 누릅니다. 샘플은 DB에 저장되지 않습니다.
+
 GUI 연결값:
 
 ```text

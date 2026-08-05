@@ -9,6 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/robot-control-v2
-COPY robot_app/config.py robot_app/robot_locator.py robot_app/robot_gateway.py ./robot_app/
+COPY robot_app/config.py robot_app/robot_locator.py \
+    robot_app/operations_store.py robot_app/robot_gateway.py ./robot_app/
 
 CMD ["python3", "/opt/robot-control-v2/robot_app/robot_gateway.py"]
