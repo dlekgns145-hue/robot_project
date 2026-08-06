@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import socket
@@ -38,16 +39,32 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def legacy_payload(payload: dict[str, Any]) -> dict[str, float | int]:
+def legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Translate the v2 GUI protocol to the existing Yahboom bridge protocol."""
     command_type = payload.get("type", "command")
     if command_type == "emergency_stop":
         return {"linear": 0.0, "angular": 0.0, "emergency_stop": 1}
+    if command_type == "navigation_cancel":
+        return {"type": "navigation_cancel"}
+    if command_type == "map_request":
+        return {"type": "map_request"}
+    if command_type == "navigate":
+        x = float(payload["x"])
+        y = float(payload["y"])
+        yaw = float(payload.get("yaw", 0.0))
+        if not all(math.isfinite(value) for value in (x, y, yaw)):
+            raise ValueError("navigation coordinates must be finite")
+        if abs(x) > 100.0 or abs(y) > 100.0 or abs(yaw) > math.pi:
+            raise ValueError("navigation coordinates are outside allowed bounds")
+        return {"type": "navigate", "x": x, "y": y, "yaw": yaw}
     if command_type not in {"command", "ping"}:
         raise ValueError(f"unsupported command type: {command_type}")
 
-    linear = 0.0 if command_type == "ping" else float(payload.get("linear", 0.0))
-    angular = 0.0 if command_type == "ping" else float(payload.get("angular", 0.0))
+    if command_type == "ping":
+        return {"heartbeat": 1}
+
+    linear = float(payload.get("linear", 0.0))
+    angular = float(payload.get("angular", 0.0))
     command: dict[str, float | int] = {
         "linear": clamp(linear, -MAX_LINEAR_SPEED, MAX_LINEAR_SPEED),
         "angular": clamp(angular, -MAX_ANGULAR_SPEED, MAX_ANGULAR_SPEED),
@@ -71,6 +88,8 @@ class RobotRelay:
         self.last_sent_at = 0.0
         self.applied_linear = 0.0
         self.applied_angular = 0.0
+        self._response_buffer = bytearray()
+        self._robot_response: dict[str, Any] = {}
         self._shutdown_event = threading.Event()
         self._reconnect_event = threading.Event()
         self._worker = threading.Thread(target=self._connection_loop, daemon=True)
@@ -100,6 +119,7 @@ class RobotRelay:
             except OSError:
                 pass
         self.connection = None
+        self._response_buffer.clear()
         if invalidate:
             self.resolution = None
             self.locator.invalidate()
@@ -169,15 +189,17 @@ class RobotRelay:
             if time.monotonic() - self.last_sent_at < ROBOT_HEARTBEAT_INTERVAL:
                 return
             try:
-                self.connection.sendall(b'{"linear":0.0,"angular":0.0}\n')
-                self.last_sent_at = time.monotonic()
+                # Keep the TCP link alive without renewing the GUI motor-command
+                # lease. New robot bridges ignore this marker; older bridges
+                # safely interpret the missing velocities as zero.
+                self._exchange_unlocked({"heartbeat": 1})
                 if self.operations is not None:
                     resolution = self.resolution
                     self.operations.set_robot_state(
                         True, ip="" if resolution is None else resolution.ip
                     )
                 return
-            except OSError as caught:
+            except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as caught:
                 error = caught
                 ip = "" if self.resolution is None else self.resolution.ip
                 self.last_error = str(caught)
@@ -191,8 +213,36 @@ class RobotRelay:
                 False, ip=ip, detail=f"heartbeat lost: {error}"
             )
 
-    def send(self, command: dict[str, float | int]) -> bool:
+    def _exchange_unlocked(self, command: dict[str, Any]) -> dict[str, Any]:
+        if self.connection is None:
+            raise ConnectionError("robot bridge is not connected")
         encoded = json.dumps(command, separators=(",", ":")).encode() + b"\n"
+        self.connection.sendall(encoded)
+        deadline = time.monotonic() + max(2.0, ROBOT_CONNECT_TIMEOUT)
+        while b"\n" not in self._response_buffer:
+            if time.monotonic() > deadline:
+                raise TimeoutError("robot bridge response timeout")
+            try:
+                chunk = self.connection.recv(65_536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise ConnectionResetError("robot bridge closed the connection")
+            self._response_buffer.extend(chunk)
+            if len(self._response_buffer) > 2_097_152:
+                raise ValueError("robot response exceeded 2 MiB")
+        raw, _, remainder = self._response_buffer.partition(b"\n")
+        self._response_buffer = bytearray(remainder)
+        response = json.loads(raw)
+        if not isinstance(response, dict):
+            raise ValueError("robot bridge response must be an object")
+        if not response.get("ok", False):
+            raise ValueError(str(response.get("error") or "robot command rejected"))
+        self._robot_response = response
+        self.last_sent_at = time.monotonic()
+        return response
+
+    def send(self, command: dict[str, Any]) -> bool:
         with self.lock:
             if self.connection is None:
                 self._reconnect_event.set()
@@ -200,13 +250,12 @@ class RobotRelay:
                 self.applied_angular = 0.0
                 return False
             try:
-                self.connection.sendall(encoded)
-                self.last_sent_at = time.monotonic()
+                self._exchange_unlocked(command)
                 self.applied_linear = float(command.get("linear", 0.0))
                 self.applied_angular = float(command.get("angular", 0.0))
                 self.last_error = ""
                 return True
-            except OSError as error:
+            except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as error:
                 self.last_error = str(error)
                 # A bridge restart does not imply that the robot's DHCP IP changed.
                 # Preserve the authenticated GUI hint for an immediate reconnect.
@@ -224,13 +273,13 @@ class RobotRelay:
                 return False
 
     def safe_stop(self) -> None:
-        stop_message = b'{"linear":0.0,"angular":0.0,"emergency_stop":1}\n'
         with self.lock:
             if self.connection is not None:
                 try:
-                    for _ in range(3):
-                        self.connection.sendall(stop_message)
-                except OSError:
+                    self._exchange_unlocked(
+                        {"linear": 0.0, "angular": 0.0, "emergency_stop": 1}
+                    )
+                except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
                     pass
             self.applied_linear = 0.0
             self.applied_angular = 0.0
@@ -253,7 +302,7 @@ class RobotRelay:
     def status(self, sent: bool) -> dict[str, Any]:
         with self.lock:
             resolution = self.resolution
-            return {
+            status = {
                 "type": "status",
                 "gateway_connected": True,
                 "robot_connected": bool(sent and self.connection is not None),
@@ -267,6 +316,13 @@ class RobotRelay:
                 "applied_linear": round(self.applied_linear, 3),
                 "applied_angular": round(self.applied_angular, 3),
             }
+            navigation = self._robot_response.get("navigation")
+            if isinstance(navigation, dict):
+                status["navigation"] = dict(navigation)
+            map_payload = self._robot_response.get("map")
+            if isinstance(map_payload, dict):
+                status["map"] = dict(map_payload)
+            return status
 
 
 def serve_gui(

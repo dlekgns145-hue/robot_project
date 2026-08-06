@@ -34,8 +34,27 @@ case "${1:-}" in
     camera)
         exec python3 /opt/robot-control/camera_stream_server.py
         ;;
+    mapping)
+        exec ros2 launch /opt/robot-control/navigation/mapping_runtime_launch.py
+        ;;
+    navigation)
+        map_yaml="${ROBOT_MAP_YAML:-/opt/robot-control/maps/orchard_map.yaml}"
+        params_template="/opt/robot-control/navigation/dwb_nav_params_fixed.yaml"
+        runtime_params="/tmp/dwb_nav_params_runtime.yaml"
+        if [[ ! -r "${map_yaml}" ]]; then
+            echo "saved navigation map is not readable: ${map_yaml}" >&2
+            exit 1
+        fi
+        python3 /opt/robot-control/navigation/prepare_navigation_params.py \
+            --template "${params_template}" \
+            --pose /opt/robot-control/maps/last_pose.json \
+            --output "${runtime_params}"
+        exec ros2 launch /opt/robot-control/navigation/navigation_runtime_launch.py \
+            map:="${map_yaml}" \
+            params_file:="${runtime_params}"
+        ;;
     *)
-        echo "usage: entrypoint.sh {bringup|base|bridge|camera}" >&2
+        echo "usage: entrypoint.sh {bringup|base|bridge|camera|mapping|navigation}" >&2
         exit 2
         ;;
 esac

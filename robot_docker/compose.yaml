@@ -67,6 +67,8 @@ services:
     command: ["bridge"]
     depends_on:
       - agent
+    volumes:
+      - ./maps:/opt/robot-control/maps
 
   camera:
     <<: *ros-service
@@ -76,3 +78,40 @@ services:
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
+
+  # Explicit profile: never starts autonomous mapping during a normal boot.
+  # The explorer itself also waits for /autonomous_mapping/start.
+  mapping-runtime:
+    <<: *ros-service
+    container_name: robot-mapping-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
+    command: ["mapping"]
+    restart: "no"
+    profiles: [mapping]
+    depends_on:
+      - agent
+      - base
+    volumes:
+      - ./maps:/opt/robot-control/maps
+
+  # Created only after the first map exists. Once created, Docker's
+  # unless-stopped policy brings it back automatically after every reboot.
+  navigation-runtime:
+    <<: *ros-service
+    container_name: robot-navigation-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
+    command: ["navigation"]
+    profiles: [navigation]
+    depends_on:
+      - agent
+      - base
+    volumes:
+      - ./maps:/opt/robot-control/maps:ro

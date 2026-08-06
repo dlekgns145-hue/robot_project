@@ -25,22 +25,32 @@ robot_cmd_bridge.py - 로봇(Docker 컨테이너) 안에서 실행하는 파일
     종료: Ctrl+C
 """
 
+import ast
+import base64
 import socket
 import json
 import math
+import os
 import threading
 import time
 from collections import deque
 
 import rclpy
+from action_msgs.msg import GoalStatus
+from nav2_msgs.action import NavigateToPose
+from rclpy.action import ActionClient
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Int32
+from std_msgs.msg import Bool, Int32
+from std_srvs.srv import SetBool
 
 HOST = "0.0.0.0"
 PORT = 9999
 COMMAND_TIMEOUT = 0.5
+MAP_DIRECTORY = "/opt/robot-control/maps"
+MAP_NAME = "orchard_map"
+LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
 
 OBSTACLE_AVOIDANCE_ENABLED = True
 OBSTACLE_STOP_DISTANCE_M = 0.40
@@ -77,12 +87,34 @@ class CmdBridgeNode(Node):
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.pub_servo_pan = self.create_publisher(Int32, "/servo_s1", 10)
         self.pub_servo_tilt = self.create_publisher(Int32, "/servo_s2", 10)
+        self.emergency_pub = self.create_publisher(
+            Bool, "/cmd_bridge/emergency_stop", 10
+        )
 
         self.lock = threading.Lock()
 
         self.desired_linear = 0.0
         self.desired_angular = 0.0
         self.last_cmd_time = 0.0
+        # Publish one safety stop when a command lease expires, then release
+        # /cmd_vel so another controller (for example Nav2) can own it.
+        self._timeout_stop_published = False
+        # Mapping/Nav2 and GUI/Follow are mutually exclusive motor owners.
+        # While this lock is active, socket commands cannot overwrite Nav2's
+        # /cmd_vel output. Emergency stop remains available in every mode.
+        self.navigation_mode = False
+        self.navigator = ActionClient(self, NavigateToPose, "/navigate_to_pose")
+        self._remote_nav_state = "idle"
+        self._remote_nav_active = False
+        self._remote_nav_message = "대기 중"
+        self._remote_nav_goal = None
+        self._remote_nav_distance = None
+        self._remote_nav_goal_handle = None
+        self._remote_nav_cancel_requested = False
+        self._remote_nav_owns_mode = False
+        self._map_pose = None
+        self._last_pose_saved_at = 0.0
+        self._last_pose_save_error_at = 0.0
 
         self.front_blocked = False
         self.front_min_dist = 10.0
@@ -103,14 +135,54 @@ class CmdBridgeNode(Node):
         self.scan_sub = self.create_subscription(
             LaserScan, "/scan", self.scan_callback, 10
         )
+        self.create_subscription(
+            PoseWithCovarianceStamped, "/amcl_pose", self._amcl_pose_callback, 10
+        )
         self.control_timer = self.create_timer(0.1, self.control_loop)
         self.create_timer(1.0, self._set_initial_tilt_once)
         self.create_timer(2.0, self._report_runtime_health)
+        self.create_service(
+            SetBool, "/cmd_bridge/navigation_mode", self._set_navigation_mode
+        )
 
         self.get_logger().info("cmd_bridge_node 시작됨 (갇힘 감지 포함)")
 
+    def _amcl_pose_callback(self, message: PoseWithCovarianceStamped):
+        pose = message.pose.pose
+        quaternion = pose.orientation
+        yaw = math.atan2(
+            2.0 * (quaternion.w * quaternion.z + quaternion.x * quaternion.y),
+            1.0 - 2.0 * (quaternion.y * quaternion.y + quaternion.z * quaternion.z),
+        )
+        saved_pose = {
+            "x": round(float(pose.position.x), 4),
+            "y": round(float(pose.position.y), 4),
+            "yaw": round(float(yaw), 4),
+        }
+        now = time.monotonic()
+        with self.lock:
+            self._map_pose = saved_pose
+            should_save = now - self._last_pose_saved_at >= 1.0
+        if should_save:
+            self._persist_map_pose(saved_pose, now)
+
+    def _persist_map_pose(self, pose: dict, now: float):
+        temporary_path = f"{LAST_POSE_PATH}.tmp"
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as pose_file:
+                json.dump(pose, pose_file, separators=(",", ":"))
+                pose_file.write("\n")
+            os.replace(temporary_path, LAST_POSE_PATH)
+            with self.lock:
+                self._last_pose_saved_at = now
+        except OSError as error:
+            if now - self._last_pose_save_error_at >= 30.0:
+                self.get_logger().warn(f"마지막 지도 위치 저장 실패: {error}")
+                self._last_pose_save_error_at = now
+
     def _report_runtime_health(self):
         cmd_subscribers = self.count_subscribers("/cmd_vel")
+        cmd_publishers = self.count_publishers("/cmd_vel")
         scan_publishers = self.count_publishers("/scan")
         scan_age = (
             time.monotonic() - self._last_scan_at
@@ -118,7 +190,7 @@ class CmdBridgeNode(Node):
             else float("inf")
         )
         scan_fresh = scan_age <= LIDAR_STALE_SEC
-        health = (cmd_subscribers, scan_publishers, scan_fresh)
+        health = (cmd_subscribers, cmd_publishers, scan_publishers, scan_fresh)
         if health == self._last_runtime_health:
             return
         self._last_runtime_health = health
@@ -134,6 +206,12 @@ class CmdBridgeNode(Node):
             )
         else:
             self.get_logger().info("모터 제어 연결 정상: /cmd_vel subscriber=1")
+
+        if cmd_publishers > 1:
+            self.get_logger().warn(
+                f"속도 명령 publisher 경합 감지: /cmd_vel publisher={cmd_publishers}. "
+                "GUI/Follow와 Navigation을 동시에 실행하지 마세요."
+            )
 
         if scan_publishers == 0:
             self.get_logger().warn(
@@ -217,9 +295,12 @@ class CmdBridgeNode(Node):
             self.emergency_stop()
             return
         with self.lock:
+            if self.navigation_mode:
+                return
             self.desired_linear = linear
             self.desired_angular = angular
             self.last_cmd_time = time.time()
+            self._timeout_stop_published = False
 
         if servo_pan is not None:
             pan = max(SERVO_PAN_MIN, min(SERVO_PAN_MAX, int(servo_pan)))
@@ -234,6 +315,17 @@ class CmdBridgeNode(Node):
             elapsed = time.time() - self.last_cmd_time
         return elapsed <= COMMAND_TIMEOUT
 
+    def _publish_timeout_stop_once(self, twist):
+        """Stop once for an expired lease without racing a new command."""
+
+        with self.lock:
+            if time.time() - self.last_cmd_time <= COMMAND_TIMEOUT:
+                return
+            if self._timeout_stop_published:
+                return
+            self.pub.publish(twist)
+            self._timeout_stop_published = True
+
     def _choose_avoid_direction(self, left, right):
         if left is not None and right is not None:
             return "LEFT" if left > right else "RIGHT"
@@ -246,14 +338,22 @@ class CmdBridgeNode(Node):
 
     def control_loop(self):
         twist = Twist()
+        with self.lock:
+            navigation_mode = self.navigation_mode
+        if navigation_mode:
+            # Nav2 owns /cmd_vel until the mapping/navigation controller
+            # explicitly releases the lock.
+            return
         notebook_connected = self._is_notebook_connected()
 
         if not notebook_connected:
             if self.avoid_state != "NORMAL":
                 self._change_avoid_state("NORMAL")
-            twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            self.pub.publish(twist)
+            # A stale GUI lease must stop the robot, but continuously publishing
+            # zero would overwrite Nav2's /cmd_vel commands forever. Send the
+            # safety stop exactly once and then remain silent until a new GUI
+            # command arrives.
+            self._publish_timeout_stop_once(twist)
             return
 
         if not OBSTACLE_AVOIDANCE_ENABLED:
@@ -355,22 +455,205 @@ class CmdBridgeNode(Node):
 
         self.pub.publish(twist)
 
+    def _set_navigation_mode(self, request, response):
+        enabled = bool(request.data)
+        self._set_navigation_control(enabled)
+        response.success = True
+        response.message = (
+            "navigation owns motor control"
+            if enabled
+            else "GUI/follow motor control restored"
+        )
+        self.get_logger().info(response.message)
+        return response
+
+    def _set_navigation_control(self, enabled: bool):
+        with self.lock:
+            self.navigation_mode = enabled
+            self.desired_linear = 0.0
+            self.desired_angular = 0.0
+            self.last_cmd_time = 0.0
+            self._timeout_stop_published = True
+        self.avoid_state = "NORMAL"
+        stop = Twist()
+        for _ in range(5):
+            self.pub.publish(stop)
+
+    def navigation_snapshot(self):
+        with self.lock:
+            return {
+                "state": self._remote_nav_state,
+                "active": self._remote_nav_active,
+                "message": self._remote_nav_message,
+                "goal": None
+                if self._remote_nav_goal is None
+                else dict(self._remote_nav_goal),
+                "distance_remaining": self._remote_nav_distance,
+                "pose": None if self._map_pose is None else dict(self._map_pose),
+            }
+
+    def start_navigation(self, x: float, y: float, yaw: float):
+        if not all(math.isfinite(value) for value in (x, y, yaw)):
+            raise ValueError("navigation coordinates must be finite")
+        with self.lock:
+            if self._remote_nav_active:
+                raise ValueError("navigation goal is already active")
+            self._remote_nav_state = "sending"
+            self._remote_nav_active = True
+            self._remote_nav_message = "Nav2 목표 전송 중"
+            self._remote_nav_goal = {
+                "x": round(float(x), 4),
+                "y": round(float(y), 4),
+                "yaw": round(float(yaw), 4),
+            }
+            self._remote_nav_distance = None
+            self._remote_nav_goal_handle = None
+            self._remote_nav_cancel_requested = False
+            self._remote_nav_owns_mode = True
+
+        if not self.navigator.wait_for_server(timeout_sec=0.5):
+            self._finish_remote_navigation("error", "Nav2 action server가 준비되지 않음")
+            raise ValueError("Nav2 action server is not ready")
+
+        self._set_navigation_control(True)
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = "map"
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = float(x)
+        goal.pose.pose.position.y = float(y)
+        goal.pose.pose.orientation.z = math.sin(float(yaw) / 2.0)
+        goal.pose.pose.orientation.w = math.cos(float(yaw) / 2.0)
+        future = self.navigator.send_goal_async(
+            goal, feedback_callback=self._on_navigation_feedback
+        )
+        future.add_done_callback(self._on_navigation_goal_response)
+
+    def _on_navigation_goal_response(self, future):
+        try:
+            goal_handle = future.result()
+        except Exception as error:
+            self._finish_remote_navigation("error", f"Nav2 목표 전송 실패: {error}")
+            return
+        if not goal_handle.accepted:
+            self._finish_remote_navigation("failed", "Nav2가 목표를 거부함")
+            return
+
+        with self.lock:
+            self._remote_nav_goal_handle = goal_handle
+            cancel_requested = self._remote_nav_cancel_requested
+            if not cancel_requested:
+                self._remote_nav_state = "navigating"
+                self._remote_nav_message = "목표로 주행 중"
+        if cancel_requested:
+            goal_handle.cancel_goal_async()
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_navigation_result)
+
+    def _on_navigation_feedback(self, feedback_message):
+        distance = float(feedback_message.feedback.distance_remaining)
+        with self.lock:
+            self._remote_nav_distance = (
+                round(distance, 3) if math.isfinite(distance) else None
+            )
+
+    def _on_navigation_result(self, future):
+        try:
+            status = future.result().status
+        except Exception as error:
+            self._finish_remote_navigation("error", f"Nav2 결과 수신 실패: {error}")
+            return
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self._finish_remote_navigation("succeeded", "목표 도착 완료")
+        elif status == GoalStatus.STATUS_CANCELED:
+            self._finish_remote_navigation("canceled", "Navigation 취소됨")
+        else:
+            self._finish_remote_navigation("failed", f"Navigation 실패 (status={status})")
+
+    def _finish_remote_navigation(self, state: str, message: str):
+        with self.lock:
+            owns_mode = self._remote_nav_owns_mode
+            self._remote_nav_state = state
+            self._remote_nav_active = False
+            self._remote_nav_message = message
+            self._remote_nav_goal_handle = None
+            self._remote_nav_cancel_requested = False
+            self._remote_nav_owns_mode = False
+        if owns_mode:
+            self._set_navigation_control(False)
+        self.get_logger().info(message)
+
+    def cancel_navigation(self, reason="사용자 요청"):
+        with self.lock:
+            if not self._remote_nav_active:
+                return False
+            self._remote_nav_cancel_requested = True
+            self._remote_nav_state = "canceling"
+            self._remote_nav_message = f"Navigation 취소 중 ({reason})"
+            goal_handle = self._remote_nav_goal_handle
+        stop = Twist()
+        for _ in range(5):
+            self.pub.publish(stop)
+        if goal_handle is not None:
+            goal_handle.cancel_goal_async()
+        return True
+
+    def load_map_payload(self):
+        image_path = f"{MAP_DIRECTORY}/{MAP_NAME}.pgm"
+        yaml_path = f"{MAP_DIRECTORY}/{MAP_NAME}.yaml"
+        with open(image_path, "rb") as image_file:
+            image_data = image_file.read()
+        metadata = {}
+        with open(yaml_path, "r", encoding="utf-8") as yaml_file:
+            for raw_line in yaml_file:
+                line = raw_line.split("#", 1)[0].strip()
+                if not line or ":" not in line:
+                    continue
+                key, value = (part.strip() for part in line.split(":", 1))
+                metadata[key] = value
+        origin = ast.literal_eval(metadata.get("origin", "[0, 0, 0]"))
+        header_tokens = []
+        for raw_line in image_data.splitlines():
+            line = raw_line.split(b"#", 1)[0].strip()
+            if line:
+                header_tokens.extend(line.split())
+            if len(header_tokens) >= 4:
+                break
+        if len(header_tokens) < 4 or header_tokens[0] not in {b"P2", b"P5"}:
+            raise ValueError("invalid PGM map")
+        return {
+            "image_base64": base64.b64encode(image_data).decode("ascii"),
+            "width": int(header_tokens[1]),
+            "height": int(header_tokens[2]),
+            "resolution": float(metadata["resolution"]),
+            "origin_x": float(origin[0]),
+            "origin_y": float(origin[1]),
+            "origin_yaw": float(origin[2]),
+            "negate": int(metadata.get("negate", "0")),
+            "occupied_thresh": float(metadata.get("occupied_thresh", "0.65")),
+            "free_thresh": float(metadata.get("free_thresh", "0.25")),
+        }
+
     def _fill_with_desired(self, twist: Twist):
         with self.lock:
             twist.linear.x = float(self.desired_linear)
             twist.angular.z = float(self.desired_angular)
 
     def emergency_stop(self):
+        self.cancel_navigation("긴급 정지")
         with self.lock:
             self.desired_linear = 0.0
             self.desired_angular = 0.0
             self.last_cmd_time = 0.0
+            self._timeout_stop_published = True
         self.avoid_state = "NORMAL"
         self.avoid_state_start = time.time()
         stop = Twist()
         for _ in range(5):
             self.pub.publish(stop)
             time.sleep(0.05)
+        event = Bool()
+        event.data = True
+        self.emergency_pub.publish(event)
 
 
 def start_socket_server(node: CmdBridgeNode):
@@ -397,20 +680,43 @@ def start_socket_server(node: CmdBridgeNode):
                         continue
                     try:
                         cmd = json.loads(line)
-                        node.publish_cmd(
-                            cmd.get("linear", 0.0),
-                            cmd.get("angular", 0.0),
-                            cmd.get("servo_pan", None),
-                            bool(cmd.get("emergency_stop", False)),
-                        )
-                    except json.JSONDecodeError:
-                        print(f"잘못된 명령 무시: {line}", flush=True)
+                        response = handle_socket_command(node, cmd)
+                    except (json.JSONDecodeError, TypeError, ValueError, OSError) as error:
+                        response = {"ok": False, "error": str(error)}
+                    conn.sendall(
+                        json.dumps(response, separators=(",", ":")).encode("utf-8")
+                        + b"\n"
+                    )
         except ConnectionResetError:
             pass
         finally:
             print(f"클라이언트 연결 종료: {addr}", flush=True)
             node.emergency_stop()
             conn.close()
+
+
+def handle_socket_command(node: CmdBridgeNode, cmd: dict):
+    response = {"ok": True}
+    command_type = cmd.get("type")
+    if command_type == "navigate":
+        node.start_navigation(float(cmd["x"]), float(cmd["y"]), float(cmd.get("yaw", 0.0)))
+    elif command_type == "navigation_cancel":
+        node.cancel_navigation()
+    elif command_type == "map_request":
+        response["map"] = node.load_map_payload()
+    elif cmd.get("heartbeat") and not cmd.get("emergency_stop"):
+        # Connection liveness is not a motor command. In particular, it must
+        # not take /cmd_vel ownership away from a standalone Nav2 session.
+        pass
+    else:
+        node.publish_cmd(
+            cmd.get("linear", 0.0),
+            cmd.get("angular", 0.0),
+            cmd.get("servo_pan", None),
+            bool(cmd.get("emergency_stop", False)),
+        )
+    response["navigation"] = node.navigation_snapshot()
+    return response
 
 
 def main():

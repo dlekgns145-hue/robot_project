@@ -76,6 +76,20 @@ class GatewayProtocolTests(unittest.TestCase):
             {"linear": 0.0, "angular": 0.0, "emergency_stop": 1},
         )
 
+    def test_ping_releases_motor_control(self) -> None:
+        self.assertEqual(legacy_payload({"type": "ping"}), {"heartbeat": 1})
+
+    def test_navigation_commands_are_validated_and_forwarded(self) -> None:
+        self.assertEqual(
+            legacy_payload({"type": "navigate", "x": 1, "y": -2, "yaw": 0.5}),
+            {"type": "navigate", "x": 1.0, "y": -2.0, "yaw": 0.5},
+        )
+        self.assertEqual(
+            legacy_payload({"type": "navigation_cancel"}),
+            {"type": "navigation_cancel"},
+        )
+        self.assertEqual(legacy_payload({"type": "map_request"}), {"type": "map_request"})
+
     def test_relay_connects_and_sends_to_legacy_robot(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
@@ -88,6 +102,9 @@ class GatewayProtocolTests(unittest.TestCase):
             with connection:
                 raw = connection.recv(1024).splitlines()[0]
                 received.append(json.loads(raw))
+                connection.sendall(
+                    b'{"ok":true,"navigation":{"state":"idle","active":false}}\n'
+                )
 
         server_thread = threading.Thread(target=robot_server)
         server_thread.start()
@@ -103,6 +120,26 @@ class GatewayProtocolTests(unittest.TestCase):
             relay.shutdown()
         listener.close()
         self.assertEqual(received, [{"linear": 0.2, "angular": -0.1}])
+
+    def test_idle_heartbeat_does_not_claim_motor_control(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.payloads: list[bytes] = []
+
+            def sendall(self, payload: bytes) -> None:
+                self.payloads.append(payload)
+
+            def recv(self, _size: int) -> bytes:
+                return b'{"ok":true,"navigation":{"state":"idle","active":false}}\n'
+
+        relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+        connection = RecordingConnection()
+        relay.connection = connection  # type: ignore[assignment]
+        relay.last_sent_at = 0.0
+
+        relay._send_idle_heartbeat()
+
+        self.assertEqual(connection.payloads, [b'{"heartbeat":1}\n'])
 
 
 if __name__ == "__main__":

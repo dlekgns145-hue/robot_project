@@ -3,12 +3,10 @@
 
 from __future__ import annotations
 
-import os
-import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QProcess, QSettings, QTimer, Qt
+from PySide6.QtCore import QEvent, QSettings, QTimer, Qt
 from PySide6.QtGui import QCloseEvent, QFont, QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -36,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from control_logic import FollowSettings
+from map_navigation import NavigationMapView
 from operations_dashboard import (
     OperationsDashboardPage,
     WorkCalendarPage,
@@ -61,7 +60,8 @@ class MainWindow(QMainWindow):
         self._last_robot_state: tuple[bool, str] | None = None
         self.follow_active = False
         self.vision_mode: str | None = None
-        self.navigation_process: QProcess | None = None
+        self._navigation_active = False
+        self._map_requested_for_ip = ""
         self._manual_keys: set[int] = set()
         self._build_ui()
         self._load_settings()
@@ -99,6 +99,11 @@ class MainWindow(QMainWindow):
         self.connection_label.setProperty("state", "offline")
         self.connection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(self.connection_label)
+        settings_button = QPushButton("설정 열기")
+        settings_button.setObjectName("HeaderSettingsButton")
+        settings_button.setProperty("role", "quiet")
+        settings_button.clicked.connect(self.open_settings_tab)
+        header_layout.addWidget(settings_button)
         root_layout.addWidget(header)
 
         self.main_tabs = QTabWidget()
@@ -200,31 +205,6 @@ class MainWindow(QMainWindow):
         right.setSpacing(14)
         right_scroll.setWidget(right_panel)
 
-        connection_group = QGroupBox("연결 설정")
-        connection_form = QFormLayout(connection_group)
-        connection_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        self.host_edit = QLineEdit()
-        self.host_edit.setPlaceholderText("예: 192.168.64.15")
-        self.command_port = QSpinBox()
-        self.command_port.setRange(1, 65535)
-        self.robot_host_edit = QLineEdit()
-        self.robot_host_edit.setPlaceholderText("raspberrypi.local")
-        self.token_edit = QLineEdit()
-        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_edit.setPlaceholderText("저장된 제어 토큰")
-        self.connect_button = QPushButton("서버에 연결")
-        self.connect_button.setProperty("role", "primary")
-        self.connect_button.setMinimumHeight(42)
-        self.connect_button.clicked.connect(self.toggle_connection)
-        connection_form.addRow("Ubuntu VM IP", self.host_edit)
-        connection_form.addRow("명령 포트", self.command_port)
-        connection_form.addRow("로봇 주소", self.robot_host_edit)
-        connection_form.addRow("제어 토큰", self.token_edit)
-        connection_form.addRow(self.connect_button)
-        right.addWidget(connection_group)
-
         follow_group = QGroupBox("자동화 및 비전")
         follow_form = QFormLayout(follow_group)
         follow_form.setFieldGrowthPolicy(
@@ -239,13 +219,7 @@ class MainWindow(QMainWindow):
         self.camera_index.setRange(0, 10)
         self.camera_url = QLineEdit()
         self.camera_url.setPlaceholderText("예: http://robot-ip:8080/stream.mjpg")
-        model_row = QHBoxLayout()
         self.model_edit = QLineEdit()
-        browse_button = QPushButton("찾기")
-        browse_button.setProperty("role", "quiet")
-        browse_button.clicked.connect(self.choose_model)
-        model_row.addWidget(self.model_edit, 1)
-        model_row.addWidget(browse_button)
         self.linear_speed = self._double_spin(0.0, 0.5, 0.35, 0.01)
         self.angular_speed = self._double_spin(0.0, 0.8, 0.4, 0.01)
         self.stop_ratio = self._double_spin(0.2, 0.9, 0.55, 0.01)
@@ -283,20 +257,17 @@ class MainWindow(QMainWindow):
         feature_buttons.addWidget(self.navigation_button, 1, 0)
         feature_buttons.addWidget(stop_features, 1, 1)
         follow_form.addRow(feature_buttons)
-        follow_form.addRow("카메라 입력", self.camera_source)
-        follow_form.addRow("카메라 번호", self.camera_index)
-        follow_form.addRow("영상 URL", self.camera_url)
-        follow_form.addRow("YOLO 모델", model_row)
         follow_form.addRow("전진 속도", self.linear_speed)
         follow_form.addRow("회전 속도", self.angular_speed)
         follow_form.addRow("정지 감도", self.stop_ratio)
-        follow_form.addRow("추론 간격", self.frame_skip)
-        navigation_title = QLabel("NAVIGATION GOAL")
-        navigation_title.setObjectName("SubsectionLabel")
-        follow_form.addRow(navigation_title)
-        follow_form.addRow("X", self.nav_x)
-        follow_form.addRow("Y", self.nav_y)
-        follow_form.addRow("Yaw", self.nav_yaw)
+        camera_hint = QLabel("카메라와 AI 모델은 ‘설정’ 탭에서 변경합니다.")
+        camera_hint.setObjectName("ControlHint")
+        camera_hint.setWordWrap(True)
+        follow_form.addRow(camera_hint)
+        navigation_hint = QLabel("목표 좌표는 ‘지도 주행’ 탭에서 선택합니다.")
+        navigation_hint.setObjectName("ControlHint")
+        navigation_hint.setWordWrap(True)
+        follow_form.addRow(navigation_hint)
         right.addWidget(follow_group)
 
         manual_group = QGroupBox("수동 주행")
@@ -325,7 +296,7 @@ class MainWindow(QMainWindow):
         self._bind_hold_button(left_turn, 0.0, 1.0)
         self._bind_hold_button(right_turn, 0.0, -1.0)
         stop.clicked.connect(self.stop_motion)
-        right.insertWidget(1, manual_group)
+        right.insertWidget(0, manual_group)
 
         self.emergency_button = QPushButton("긴급 정지   EMERGENCY STOP")
         self.emergency_button.setObjectName("EmergencyButton")
@@ -337,8 +308,187 @@ class MainWindow(QMainWindow):
         self.operations_page = OperationsDashboardPage()
         self.operations_page.demo_requested.connect(self._show_operations_demo)
         self.calendar_page = WorkCalendarPage()
+        self._build_navigation_page()
         self.main_tabs.addTab(self.operations_page, "운영 현황")
         self.main_tabs.addTab(self.calendar_page, "작업 캘린더")
+        self._build_settings_page()
+
+    def _build_settings_page(self) -> None:
+        self.settings_page = QWidget()
+        self.settings_page.setObjectName("SettingsPage")
+        page_layout = QVBoxLayout(self.settings_page)
+        page_layout.setContentsMargins(8, 10, 8, 12)
+        page_layout.setSpacing(12)
+
+        title = QLabel("설정")
+        title.setObjectName("PageTitle")
+        subtitle = QLabel(
+            "서버 연결과 카메라 환경을 한곳에서 관리합니다. 변경값은 이 컴퓨터에 저장됩니다."
+        )
+        subtitle.setObjectName("Subtitle")
+        page_layout.addWidget(title)
+        page_layout.addWidget(subtitle)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("SettingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content.setObjectName("SettingsContent")
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 4, 4, 4)
+        content_layout.setSpacing(16)
+
+        network_group = QGroupBox("서버 및 로봇 연결")
+        network_layout = QVBoxLayout(network_group)
+        network_hint = QLabel(
+            "GUI가 접속할 Ubuntu 서버와 서버가 제어할 로봇 주소를 입력하세요."
+        )
+        network_hint.setObjectName("SettingsHint")
+        network_hint.setWordWrap(True)
+        network_layout.addWidget(network_hint)
+        connection_form = QFormLayout()
+        connection_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("예: 172.30.1.81 또는 127.0.0.1")
+        self.command_port = QSpinBox()
+        self.command_port.setRange(1, 65535)
+        self.robot_host_edit = QLineEdit()
+        self.robot_host_edit.setPlaceholderText("예: raspberrypi.local")
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setPlaceholderText("저장된 제어 토큰")
+        connection_form.addRow("서버 IP / 호스트", self.host_edit)
+        connection_form.addRow("명령 포트", self.command_port)
+        connection_form.addRow("로봇 주소", self.robot_host_edit)
+        connection_form.addRow("제어 토큰", self.token_edit)
+        network_layout.addLayout(connection_form)
+        self.settings_connection_label = QLabel("●  연결 안 됨")
+        self.settings_connection_label.setObjectName("SettingsConnectionStatus")
+        self.settings_connection_label.setProperty("state", "offline")
+        network_layout.addWidget(self.settings_connection_label)
+        network_actions = QHBoxLayout()
+        save_button = QPushButton("설정 저장")
+        save_button.setProperty("role", "quiet")
+        save_button.clicked.connect(self.save_settings_from_ui)
+        self.connect_button = QPushButton("서버에 연결")
+        self.connect_button.setProperty("role", "primary")
+        self.connect_button.clicked.connect(self.toggle_connection)
+        for button in (save_button, self.connect_button):
+            button.setMinimumHeight(44)
+            network_actions.addWidget(button)
+        network_layout.addLayout(network_actions)
+        network_layout.addStretch(1)
+        content_layout.addWidget(network_group, 1)
+
+        camera_group = QGroupBox("카메라 및 AI")
+        camera_layout = QVBoxLayout(camera_group)
+        camera_hint = QLabel(
+            "Follow Me와 비전 인식에 사용할 영상 입력과 YOLO 모델을 지정합니다."
+        )
+        camera_hint.setObjectName("SettingsHint")
+        camera_hint.setWordWrap(True)
+        camera_layout.addWidget(camera_hint)
+        camera_form = QFormLayout()
+        camera_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        model_row = QHBoxLayout()
+        browse_button = QPushButton("찾기")
+        browse_button.setProperty("role", "quiet")
+        browse_button.clicked.connect(self.choose_model)
+        model_row.addWidget(self.model_edit, 1)
+        model_row.addWidget(browse_button)
+        camera_form.addRow("카메라 입력", self.camera_source)
+        camera_form.addRow("카메라 번호", self.camera_index)
+        camera_form.addRow("영상 URL", self.camera_url)
+        camera_form.addRow("YOLO 모델", model_row)
+        camera_form.addRow("추론 간격", self.frame_skip)
+        camera_layout.addLayout(camera_form)
+        camera_note = QLabel(
+            "로봇 카메라(자동)는 현재 연결된 로봇의 영상 스트림을 사용합니다."
+        )
+        camera_note.setObjectName("SettingsInfo")
+        camera_note.setWordWrap(True)
+        camera_layout.addWidget(camera_note)
+        camera_layout.addStretch(1)
+        content_layout.addWidget(camera_group, 1)
+
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll, 1)
+        self.main_tabs.addTab(self.settings_page, "설정")
+
+    def open_settings_tab(self) -> None:
+        if hasattr(self, "settings_page"):
+            self.main_tabs.setCurrentWidget(self.settings_page)
+
+    def _build_navigation_page(self) -> None:
+        page = QWidget()
+        page.setObjectName("NavigationPage")
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(4, 10, 4, 4)
+        layout.setSpacing(18)
+
+        map_card = QFrame()
+        map_card.setObjectName("PreviewCard")
+        map_layout = QVBoxLayout(map_card)
+        map_header = QHBoxLayout()
+        title = QLabel("SAVED MAP NAVIGATION")
+        title.setObjectName("SectionKicker")
+        self.map_summary_label = QLabel("지도 대기 중")
+        self.map_summary_label.setObjectName("VisionMetrics")
+        map_header.addWidget(title)
+        map_header.addStretch(1)
+        map_header.addWidget(self.map_summary_label)
+        map_layout.addLayout(map_header)
+        self.map_view = NavigationMapView()
+        self.map_view.goal_selected.connect(self._on_map_goal_selected)
+        self.map_view.selection_rejected.connect(self.append_log)
+        map_layout.addWidget(self.map_view, 1)
+        legend = QLabel("파란색: 로봇 위치 · 주황색: 선택 목표 · 흰색: 주행 가능 영역")
+        legend.setObjectName("ControlHint")
+        legend.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        map_layout.addWidget(legend)
+        layout.addWidget(map_card, 1)
+
+        controls = QGroupBox("지도 목표 설정")
+        controls.setMinimumWidth(310)
+        controls.setMaximumWidth(380)
+        controls_layout = QVBoxLayout(controls)
+        explanation = QLabel(
+            "지도에서 흰색 공간을 클릭한 뒤 방향(Yaw)을 정하고 이동 버튼을 누르세요."
+        )
+        explanation.setWordWrap(True)
+        explanation.setObjectName("ControlHint")
+        controls_layout.addWidget(explanation)
+        form = QFormLayout()
+        form.addRow("목표 X", self.nav_x)
+        form.addRow("목표 Y", self.nav_y)
+        form.addRow("목표 Yaw", self.nav_yaw)
+        controls_layout.addLayout(form)
+        self.map_goal_label = QLabel("지도에서 목표를 선택하세요")
+        self.map_goal_label.setWordWrap(True)
+        controls_layout.addWidget(self.map_goal_label)
+        self.navigation_status_label = QLabel("Navigation 대기 중")
+        self.navigation_status_label.setWordWrap(True)
+        self.navigation_status_label.setObjectName("MetricValue")
+        controls_layout.addWidget(self.navigation_status_label)
+        controls_layout.addStretch(1)
+        refresh_button = QPushButton("저장 지도 새로고침")
+        refresh_button.clicked.connect(self.refresh_map)
+        self.map_navigation_button = QPushButton("이 위치로 이동")
+        self.map_navigation_button.setProperty("role", "primary")
+        self.map_navigation_button.clicked.connect(self.start_navigation)
+        cancel_button = QPushButton("Navigation 취소")
+        cancel_button.setProperty("role", "quiet")
+        cancel_button.clicked.connect(self.stop_navigation)
+        for button in (refresh_button, self.map_navigation_button, cancel_button):
+            button.setMinimumHeight(42)
+            controls_layout.addWidget(button)
+        layout.addWidget(controls)
+        self.main_tabs.addTab(page, "지도 주행")
 
     @staticmethod
     def _metric_card(label: str, value: QLabel) -> QFrame:
@@ -468,6 +618,14 @@ class MainWindow(QMainWindow):
         self.nav_x.setValue(float(self.settings_store.value("nav_x", 1.0)))
         self.nav_y.setValue(float(self.settings_store.value("nav_y", 0.5)))
         self.nav_yaw.setValue(float(self.settings_store.value("nav_yaw", 0.0)))
+        self.linear_speed.setValue(
+            float(self.settings_store.value("linear_speed", 0.35))
+        )
+        self.angular_speed.setValue(
+            float(self.settings_store.value("angular_speed", 0.4))
+        )
+        self.stop_ratio.setValue(float(self.settings_store.value("stop_ratio", 0.55)))
+        self.frame_skip.setValue(int(self.settings_store.value("frame_skip", 2)))
         self._update_camera_fields()
         default_model = Path(__file__).resolve().parents[2] / "yolov8n-pose.pt"
         self.model_edit.setText(self.settings_store.value("model", str(default_model)))
@@ -484,6 +642,15 @@ class MainWindow(QMainWindow):
         self.settings_store.setValue("nav_x", self.nav_x.value())
         self.settings_store.setValue("nav_y", self.nav_y.value())
         self.settings_store.setValue("nav_yaw", self.nav_yaw.value())
+        self.settings_store.setValue("linear_speed", self.linear_speed.value())
+        self.settings_store.setValue("angular_speed", self.angular_speed.value())
+        self.settings_store.setValue("stop_ratio", self.stop_ratio.value())
+        self.settings_store.setValue("frame_skip", self.frame_skip.value())
+        self.settings_store.sync()
+
+    def save_settings_from_ui(self) -> None:
+        self._save_settings()
+        self.append_log("연결 및 카메라 설정을 저장했습니다")
 
     def _update_camera_fields(self) -> None:
         source = self.camera_source.currentData()
@@ -504,7 +671,7 @@ class MainWindow(QMainWindow):
             return
         host = self.host_edit.text().strip()
         if not host:
-            QMessageBox.warning(self, "연결", "Ubuntu VM IP를 입력하세요.")
+            QMessageBox.warning(self, "연결", "서버 IP 또는 호스트를 입력하세요.")
             return
         self._save_settings()
         self.client = RobotClient(
@@ -517,6 +684,7 @@ class MainWindow(QMainWindow):
         )
         self.client.connection_changed.connect(self.on_connection_changed)
         self.client.status_received.connect(self.on_status)
+        self.client.map_received.connect(self.on_map_payload)
         self.client.operations_received.connect(self.on_operations_snapshot)
         self.client.log_message.connect(self.append_log)
         self.client.start()
@@ -553,6 +721,7 @@ class MainWindow(QMainWindow):
         self.robot_connected = False
         self.current_robot_ip = ""
         self._last_robot_state = None
+        self._map_requested_for_ip = ""
         self.connect_button.setText("서버에 연결")
         self.host_edit.setEnabled(True)
         self.command_port.setEnabled(True)
@@ -584,6 +753,9 @@ class MainWindow(QMainWindow):
                     f"●  VM · 로봇 {robot_ip} 연결됨", "online"
                 )
                 self.lidar_label.setText("로봇 내부 안전제어")
+                if self.client is not None and self._map_requested_for_ip != robot_ip:
+                    self._map_requested_for_ip = robot_ip
+                    self.client.request_map()
             else:
                 self._set_connection_status(
                     "●  VM 연결됨 · 로봇 재연결 중", "waiting"
@@ -610,6 +782,51 @@ class MainWindow(QMainWindow):
             f"linear={float(status.get('applied_linear', 0.0)):.2f} · "
             f"angular={float(status.get('applied_angular', 0.0)):.2f}"
         )
+        navigation = status.get("navigation")
+        if isinstance(navigation, dict):
+            self._update_navigation_status(navigation)
+
+    def on_map_payload(self, payload: dict) -> None:
+        try:
+            self.map_view.set_map_payload(payload)
+            width = int(payload["width"])
+            height = int(payload["height"])
+            resolution = float(payload["resolution"])
+            self.map_summary_label.setText(
+                f"{width * resolution:.2f} × {height * resolution:.2f} m"
+            )
+            self.append_log("로봇에서 저장 지도를 불러왔습니다")
+        except (KeyError, TypeError, ValueError) as error:
+            self._map_requested_for_ip = ""
+            self.append_log(f"지도 표시 실패: {error}")
+
+    def refresh_map(self) -> None:
+        if self.client is None or not self.robot_connected:
+            QMessageBox.warning(self, "지도", "먼저 Ubuntu VM과 로봇에 연결하세요.")
+            return
+        self.client.request_map()
+        self.map_summary_label.setText("지도 불러오는 중")
+
+    def _on_map_goal_selected(self, x: float, y: float) -> None:
+        self.nav_x.setValue(x)
+        self.nav_y.setValue(y)
+        self.map_goal_label.setText(f"선택 목표: X={x:.2f}, Y={y:.2f}")
+        self.append_log(f"지도 목표 선택: x={x:.2f}, y={y:.2f}")
+
+    def _update_navigation_status(self, navigation: dict) -> None:
+        state = str(navigation.get("state", "idle"))
+        self._navigation_active = bool(navigation.get("active", False))
+        message = str(navigation.get("message") or state)
+        distance = navigation.get("distance_remaining")
+        if distance is not None:
+            message += f" · 남은 거리 {float(distance):.2f} m"
+        self.navigation_status_label.setText(message)
+        self.map_view.set_robot_pose(navigation.get("pose"))
+        self.navigation_button.setChecked(self._navigation_active)
+        self.navigation_button.setText(
+            "Navigation 중지" if self._navigation_active else "Navigation"
+        )
+        self.map_navigation_button.setEnabled(not self._navigation_active)
 
     def on_operations_snapshot(self, snapshot: dict) -> None:
         self.operations_page.update_snapshot(snapshot)
@@ -627,6 +844,12 @@ class MainWindow(QMainWindow):
         style = self.connection_label.style()
         style.unpolish(self.connection_label)
         style.polish(self.connection_label)
+        if hasattr(self, "settings_connection_label"):
+            self.settings_connection_label.setText(text)
+            self.settings_connection_label.setProperty("state", state)
+            settings_style = self.settings_connection_label.style()
+            settings_style.unpolish(self.settings_connection_label)
+            settings_style.polish(self.settings_connection_label)
 
     def toggle_follow(self, checked: bool) -> None:
         if checked:
@@ -751,98 +974,51 @@ class MainWindow(QMainWindow):
             self.stop_navigation()
 
     def start_navigation(self) -> None:
-        configured = os.getenv("ROBOT_ROS2_EXECUTABLE", "ros2")
-        executable = shutil.which(configured)
-        if executable is None and Path(configured).is_file():
-            executable = configured
-        if executable is None:
+        if self.client is None or not self.robot_connected:
             self.navigation_button.setChecked(False)
             QMessageBox.warning(
                 self,
                 "Navigation",
-                "ros2 실행 파일을 찾을 수 없습니다.\n"
-                "Navigation 버튼은 ROS2와 Nav2가 설치된 컴퓨터에서 "
-                "GUI를 실행했을 때 사용할 수 있습니다.",
+                "먼저 Ubuntu VM과 로봇에 연결하세요.",
             )
             return
-
-        self.stop_vision()
-        self.stop_navigation()
-        self._save_settings()
-        process = QProcess(self)
-        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        process.readyReadStandardOutput.connect(self._read_navigation_output)
-        process.finished.connect(self._navigation_finished)
-        process.errorOccurred.connect(
-            lambda error: self.append_log(f"Navigation 프로세스 오류: {error}")
+        if self._navigation_active:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Navigation 출발 확인",
+            "로봇 주변과 목표까지의 통로에 사람·물건이 없습니까?\n"
+            f"목표: X={self.nav_x.value():.2f}, Y={self.nav_y.value():.2f}, "
+            f"Yaw={self.nav_yaw.value():.2f}",
         )
-        self.navigation_process = process
-        arguments = [
-            "run",
-            "robot_project",
-            "integrated_main",
-            "--mode",
-            "navigation",
-            "--control-stdin",
-            "--ros-args",
-            "-p",
-            f"goal_x:={self.nav_x.value()}",
-            "-p",
-            f"goal_y:={self.nav_y.value()}",
-            "-p",
-            f"goal_yaw:={self.nav_yaw.value()}",
-        ]
-        process.start(executable, arguments)
-        if not process.waitForStarted(3000):
-            self.navigation_process = None
-            process.deleteLater()
+        if answer != QMessageBox.StandardButton.Yes:
             self.navigation_button.setChecked(False)
-            QMessageBox.critical(
-                self, "Navigation", "Navigation 통합 프로세스를 시작하지 못했습니다."
-            )
             return
+        self.stop_vision()
+        self._save_settings()
+        self.client.navigate_to(
+            self.nav_x.value(), self.nav_y.value(), self.nav_yaw.value()
+        )
+        self._navigation_active = True
         self.navigation_button.setChecked(True)
         self.navigation_button.setText("Navigation 중지")
+        self.map_navigation_button.setEnabled(False)
+        self.navigation_status_label.setText("Nav2 목표 전송 중")
         self.append_log(
             "Navigation 시작: "
             f"x={self.nav_x.value():.2f}, y={self.nav_y.value():.2f}, "
             f"yaw={self.nav_yaw.value():.2f}"
         )
 
-    def _read_navigation_output(self) -> None:
-        if self.navigation_process is None:
-            return
-        output = bytes(self.navigation_process.readAllStandardOutput()).decode(
-            errors="replace"
-        )
-        for line in output.splitlines():
-            if line.strip():
-                self.append_log(f"[Navigation] {line}")
-
-    def _navigation_finished(self, exit_code: int, _status: object) -> None:
-        process = self.navigation_process
-        self.navigation_process = None
-        self.navigation_button.setChecked(False)
-        self.navigation_button.setText("Navigation")
-        self.append_log(f"Navigation 종료 (code={exit_code})")
-        if process is not None:
-            process.deleteLater()
-
     def stop_navigation(self) -> None:
-        process = self.navigation_process
-        if process is not None:
-            process.write(b"stop\n")
-            process.waitForBytesWritten(300)
-            if not process.waitForFinished(2000):
-                process.terminate()
-                if not process.waitForFinished(1000):
-                    process.kill()
-                    process.waitForFinished(1000)
-            if self.navigation_process is process:
-                self.navigation_process = None
-                process.deleteLater()
+        if self._navigation_active and self.client is not None:
+            self.client.cancel_navigation()
+            self.navigation_status_label.setText("Navigation 취소 요청 전송 중")
+            self.append_log("Navigation 취소 요청")
+        self._navigation_active = False
         self.navigation_button.setChecked(False)
         self.navigation_button.setText("Navigation")
+        self.map_navigation_button.setEnabled(True)
 
     def stop_all_features(self) -> None:
         self.stop_vision()

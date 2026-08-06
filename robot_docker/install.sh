@@ -87,13 +87,24 @@ done
 systemctl daemon-reload
 systemctl reset-failed
 
+# The vendor desktop starts anonymous agent and all-in-one ROS containers at
+# login.  They race Compose for the serial device and publish an independent
+# /cmd_vel.  Preserve the entries for recovery, but keep the desktop session
+# from launching them again.
+for legacy_autostart in /home/*/.config/autostart/*.desktop; do
+    [[ -f "${legacy_autostart}" ]] || continue
+    if grep -Eq 'start_agent_rpi5\.sh|ros2_humble\.sh' "${legacy_autostart}"; then
+        mv "${legacy_autostart}" "${legacy_autostart}.disabled-by-robot-control"
+    fi
+done
+
 stop_old_image_containers() {
     local image="$1"
     local container_id
     while IFS= read -r container_id; do
         [[ -n "${container_id}" ]] || continue
         docker update --restart=no "${container_id}" >/dev/null 2>&1 || true
-        docker rm -f "${container_id}" >/dev/null 2>&1 || true
+        docker stop --time 10 "${container_id}" >/dev/null 2>&1 || true
     done < <(docker ps -aq --filter "ancestor=${image}")
 }
 
@@ -102,7 +113,7 @@ stop_old_named_containers() {
     for container_name in "$@"; do
         if docker container inspect "${container_name}" >/dev/null 2>&1; then
             docker update --restart=no "${container_name}" >/dev/null 2>&1 || true
-            docker rm -f "${container_name}" >/dev/null 2>&1 || true
+            docker stop --time 10 "${container_name}" >/dev/null 2>&1 || true
         fi
     done
 }
@@ -114,7 +125,11 @@ stop_old_image_containers "microros/micro-ros-agent:humble"
 stop_old_image_containers "yahboomtechnology/ros-humble:4.1.2"
 
 docker compose build
-docker compose up -d --remove-orphans
+if [[ -r "${DEPLOY_DIR}/maps/orchard_map.yaml" ]]; then
+    docker compose --profile navigation up -d --remove-orphans
+else
+    docker compose up -d --remove-orphans
+fi
 docker compose ps
 
 serial_ready=false

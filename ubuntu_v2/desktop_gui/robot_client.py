@@ -6,6 +6,7 @@ import json
 import socket
 import threading
 import time
+from collections import deque
 from typing import Any
 
 from PySide6.QtCore import QThread, Signal
@@ -15,6 +16,7 @@ class RobotClient(QThread):
     connection_changed = Signal(bool, str)
     status_received = Signal(dict)
     operations_received = Signal(dict)
+    map_received = Signal(dict)
     log_message = Signal(str)
     STOP_BURST_COUNT = 5
 
@@ -39,6 +41,7 @@ class RobotClient(QThread):
         self._stop_event = threading.Event()
         self._shutdown_requested = threading.Event()
         self._command_lock = threading.Lock()
+        self._pending_commands: deque[dict[str, Any]] = deque()
         self._command: dict[str, Any] = {
             "type": "command",
             "linear": 0.0,
@@ -62,7 +65,38 @@ class RobotClient(QThread):
 
     def emergency_stop(self) -> None:
         with self._command_lock:
+            self._pending_commands.clear()
             self._command = {"type": "emergency_stop"}
+
+    def navigate_to(self, x: float, y: float, yaw: float = 0.0) -> None:
+        if self._shutdown_requested.is_set():
+            return
+        with self._command_lock:
+            self._pending_commands.append(
+                {"type": "navigate", "x": float(x), "y": float(y), "yaw": float(yaw)}
+            )
+            self._command = {"type": "ping"}
+
+    def cancel_navigation(self) -> None:
+        if self._shutdown_requested.is_set():
+            return
+        with self._command_lock:
+            self._pending_commands.append({"type": "navigation_cancel"})
+            self._command = {"type": "ping"}
+
+    def request_map(self) -> None:
+        if self._shutdown_requested.is_set():
+            return
+        with self._command_lock:
+            self._pending_commands.append({"type": "map_request"})
+
+    def release_control(self) -> None:
+        """Keep status polling alive without publishing a motor command."""
+
+        if self._shutdown_requested.is_set():
+            return
+        with self._command_lock:
+            self._command = {"type": "ping"}
 
     def stop(self) -> None:
         # The worker sends and acknowledges a stop burst before it exits.
@@ -97,7 +131,11 @@ class RobotClient(QThread):
 
     def _current_command(self) -> dict[str, Any]:
         with self._command_lock:
-            command = dict(self._command)
+            command = dict(
+                self._pending_commands.popleft()
+                if self._pending_commands
+                else self._command
+            )
         if self.token:
             command["token"] = self.token
         if self.robot_host and time.monotonic() - self._robot_resolved_at >= 5.0:
@@ -170,6 +208,9 @@ class RobotClient(QThread):
                         response = json.loads(line)
                         if response.get("type") == "status":
                             operations = response.pop("operations", None)
+                            map_payload = response.pop("map", None)
+                            if isinstance(map_payload, dict):
+                                self.map_received.emit(map_payload)
                             if isinstance(operations, dict):
                                 revision = operations.get("revision")
                                 if revision is not None:

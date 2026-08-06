@@ -191,7 +191,7 @@ class OperationsDashboardPage(QScrollArea):
         for row, robot in enumerate(robots):
             online = bool(robot.get("online"))
             status_text = "● 온라인" if online else "● 오프라인"
-            status_color = "#58e0b5" if online else "#ff8b8b"
+            status_color = "#087a57" if online else "#b42336"
             started = parse_timestamp(robot.get("active_session_started_at"))
             elapsed = "-"
             if online and started is not None:
@@ -224,7 +224,7 @@ class OperationsDashboardPage(QScrollArea):
                 "온라인" if active else session.get("end_reason") or "-",
             )
             for column, value in enumerate(values):
-                color = "#58e0b5" if active and column == 2 else None
+                color = "#087a57" if active and column == 2 else None
                 self.session_table.setItem(row, column, _item(value, color=color))
 
     def _render_events(self) -> None:
@@ -241,7 +241,7 @@ class OperationsDashboardPage(QScrollArea):
             )
             for column, value in enumerate(values):
                 color = (
-                    "#58e0b5" if online else "#ff8b8b"
+                    "#087a57" if online else "#b42336"
                 ) if column == 1 else None
                 self.event_table.setItem(row, column, _item(value, color=color))
 
@@ -308,8 +308,8 @@ class WorkCalendarPage(QWidget):
             )
         self.highlighted_dates = active_dates(self.snapshot.get("sessions") or [])
         active_format = QTextCharFormat()
-        active_format.setBackground(QColor("#174d68"))
-        active_format.setForeground(QColor("#eaf8ff"))
+        active_format.setBackground(QColor("#dbeeff"))
+        active_format.setForeground(QColor("#174f82"))
         active_format.setFontWeight(700)
         for highlighted in self.highlighted_dates:
             self.calendar.setDateTextFormat(
@@ -361,7 +361,7 @@ class WorkCalendarPage(QWidget):
             )
             for column, value in enumerate(values):
                 color = (
-                    "#58e0b5" if online else "#ff8b8b"
+                    "#087a57" if online else "#b42336"
                 ) if column == 1 else None
                 self.day_events.setItem(row, column, _item(value, color=color))
 

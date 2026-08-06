@@ -15,6 +15,27 @@ from robot_client import RobotClient  # noqa: E402
 
 
 class RobotClientShutdownTests(unittest.TestCase):
+    def test_release_control_switches_status_loop_to_ping(self) -> None:
+        client = RobotClient("127.0.0.1", 9999, robot_host="")
+        client.set_command(0.2, 0.1)
+
+        client.release_control()
+
+        self.assertEqual(client._current_command(), {"type": "ping"})
+
+    def test_navigation_and_map_requests_are_sent_once_before_ping(self) -> None:
+        client = RobotClient("127.0.0.1", 9999, robot_host="")
+
+        client.request_map()
+        client.navigate_to(1.2, -0.4, 0.5)
+
+        self.assertEqual(client._current_command(), {"type": "map_request"})
+        self.assertEqual(
+            client._current_command(),
+            {"type": "navigate", "x": 1.2, "y": -0.4, "yaw": 0.5},
+        )
+        self.assertEqual(client._current_command(), {"type": "ping"})
+
     def test_shutdown_sends_stop_burst_after_motion(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
