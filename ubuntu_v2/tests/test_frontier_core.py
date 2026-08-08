@@ -120,6 +120,30 @@ class FrontierCoreTests(unittest.TestCase):
         self.assertNotIn(goal_index, frontiers)
         self.assertEqual(data[goal_index], 0)
 
+    def test_far_frontier_is_staged_along_connected_free_path(self) -> None:
+        spec = GridSpec(width=45, height=5, resolution=0.1)
+        data = [-1] * (spec.width * spec.height)
+        for x in range(1, 44):
+            for y in range(1, 4):
+                data[y * spec.width + x] = 0
+
+        candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.25,
+            robot_y=0.25,
+            min_cells=2,
+            min_distance=0.45,
+            max_distance=7.0,
+            goal_standoff=0.1,
+            maximum_goal_step_distance=1.25,
+        )
+
+        self.assertTrue(candidates)
+        self.assertLessEqual(candidates[0].distance, 1.26)
+        goal_index = candidates[0].grid_y * spec.width + candidates[0].grid_x
+        self.assertEqual(data[goal_index], 0)
+
     def test_blacklist_excludes_only_nearby_part_of_cluster(self) -> None:
         spec = GridSpec(width=5, height=5, resolution=0.2)
         data = [-1] * 25

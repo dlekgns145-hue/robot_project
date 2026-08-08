@@ -34,13 +34,14 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("base_frame", "base_footprint")
         self.declare_parameter("decision_period", 1.0)
         self.declare_parameter("startup_delay", 8.0)
-        self.declare_parameter("goal_timeout", 90.0)
+        self.declare_parameter("goal_timeout", 35.0)
         self.declare_parameter("minimum_runtime", 60.0)
         self.declare_parameter("maximum_runtime", 1800.0)
         self.declare_parameter("completion_stable_maps", 5)
         self.declare_parameter("minimum_frontier_length", 0.35)
         self.declare_parameter("minimum_goal_distance", 0.45)
         self.declare_parameter("maximum_goal_distance", 7.0)
+        self.declare_parameter("maximum_goal_step_distance", 1.25)
         self.declare_parameter("frontier_goal_standoff", 0.10)
         self.declare_parameter("maximum_exploration_radius", 25.0)
         self.declare_parameter("blacklist_radius", 0.7)
@@ -108,6 +109,7 @@ class AutonomousMappingNode(Node):
         self.save_requested_reason = ""
         self.saving_map_output = ""
         self.saved_map = ""
+        self.save_sequence = 0
         self._publish_status("autonomous mapping ready; waiting for start")
 
     def _seconds(self) -> float:
@@ -262,6 +264,9 @@ class AutonomousMappingNode(Node):
             blacklist_radius=float(self.get_parameter("blacklist_radius").value),
             goal_standoff=float(
                 self.get_parameter("frontier_goal_standoff").value
+            ),
+            maximum_goal_step_distance=float(
+                self.get_parameter("maximum_goal_step_distance").value
             ),
         )
         start_x, start_y = self.start_pose or (robot_x, robot_y)
@@ -449,6 +454,7 @@ class AutonomousMappingNode(Node):
             self._publish_status(f"map save failed: {error}")
         if saved:
             self.saved_map = self.saving_map_output
+            self.save_sequence += 1
             self._publish_status(f"map saved: {self.saving_map_output}")
         else:
             self._publish_status("map saver reported failure")
@@ -462,6 +468,7 @@ class AutonomousMappingNode(Node):
             "empty_map_count": self.empty_map_count,
             "distance_remaining": self.distance_remaining,
             "saved_map": self.saved_map,
+            "save_sequence": self.save_sequence,
         }
         if self.goal_candidate is not None:
             payload["goal"] = asdict(self.goal_candidate)

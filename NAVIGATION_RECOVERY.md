@@ -90,6 +90,30 @@ docker start robot-command-bridge
 
 ## 3. Navigation 재현
 
+### GUI에서 새 지도 만들기
+
+Navigation 런타임과 mapping 런타임은 같은 Nav2 노드 이름을 사용하므로 동시에
+실행하지 않는다. 로봇 호스트에서 아래처럼 매핑 모드로 전환하면 GUI의 `지도 주행 →
+현장 지도 만들기` 버튼이 활성화된다.
+
+```bash
+cd /path/to/robot_docker
+docker compose --profile navigation stop navigation-runtime
+docker compose --profile mapping up -d mapping-runtime
+```
+
+GUI에서 `자동 매핑 시작` 후 필요할 때 `현재 지도 저장`을 누른다. 저장이 완료되면
+`orchard_map.pgm/.yaml`과 함께 `orchard_map_texture.png`가 생성된다. texture는 카메라
+영상을 지면으로 투영한 안내용 레이어이며, 장애물 판정과 목표 좌표는 항상 LiDAR PGM을
+사용한다. 카메라를 읽지 못해도 LiDAR 지도 저장은 정상 동작한다.
+
+매핑을 마친 뒤에는 다음처럼 Navigation 모드로 되돌린다.
+
+```bash
+docker compose --profile mapping stop mapping-runtime
+docker compose --profile navigation up -d navigation-runtime
+```
+
 Navigation을 시작하고 모든 Nav2 lifecycle node가 active인지 확인한 뒤 initial pose를
 발행한다. initial pose의 위치와 방향은 지도상의 실제 로봇 위치와 일치해야 한다.
 

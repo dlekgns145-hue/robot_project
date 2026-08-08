@@ -33,6 +33,7 @@ import math
 import os
 import threading
 import time
+import zlib
 from collections import deque
 
 import rclpy
@@ -40,10 +41,11 @@ from action_msgs.msg import GoalStatus
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, Int32
-from std_srvs.srv import SetBool
+from std_msgs.msg import Bool, Int32, String
+from std_srvs.srv import SetBool, Trigger
 
 HOST = "0.0.0.0"
 PORT = 9999
@@ -51,6 +53,7 @@ COMMAND_TIMEOUT = 0.5
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
 LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
+MAP_TEXTURE_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_texture.png"
 
 OBSTACLE_AVOIDANCE_ENABLED = True
 OBSTACLE_STOP_DISTANCE_M = 0.40
@@ -76,7 +79,8 @@ STUCK_TIMEOUT_SEC = 4.0  # 이 시간 넘게 NORMAL로 못 돌아오면 "갇혔�
 ESCAPE_ANGULAR_SPEED = 0.4  # 탈출 회전 속도
 ESCAPE_TURN_TIME_SEC = 2.5  # 이 시간 동안 LiDAR 무시하고 무조건 회전
 
-SERVO_TILT_DEFAULT = -60
+# Ground-facing angle verified on the physical robot during the overlay test.
+SERVO_TILT_DEFAULT = -80
 SERVO_PAN_MIN = -60
 SERVO_PAN_MAX = 60
 
@@ -113,6 +117,12 @@ class CmdBridgeNode(Node):
         self._remote_nav_cancel_requested = False
         self._remote_nav_owns_mode = False
         self._map_pose = None
+        self._mapping_status = {
+            "state": "unavailable",
+            "enabled": False,
+            "message": "매핑 런타임을 기다리는 중",
+            "saved_map": "",
+        }
         self._last_pose_saved_at = 0.0
         self._last_pose_save_error_at = 0.0
 
@@ -138,6 +148,29 @@ class CmdBridgeNode(Node):
         self.create_subscription(
             PoseWithCovarianceStamped, "/amcl_pose", self._amcl_pose_callback, 10
         )
+        mapping_qos = QoSProfile(depth=1)
+        mapping_qos.reliability = ReliabilityPolicy.RELIABLE
+        mapping_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(
+            String,
+            "/autonomous_mapping/status",
+            self._mapping_status_callback,
+            mapping_qos,
+        )
+        self.mapping_clients = {
+            "mapping_start": self.create_client(
+                Trigger, "/autonomous_mapping/start"
+            ),
+            "mapping_stop": self.create_client(
+                Trigger, "/autonomous_mapping/stop"
+            ),
+            "mapping_save": self.create_client(
+                Trigger, "/autonomous_mapping/save"
+            ),
+            "mapping_preview": self.create_client(
+                Trigger, "/autonomous_mapping/preview"
+            ),
+        }
         self.control_timer = self.create_timer(0.1, self.control_loop)
         self.create_timer(1.0, self._set_initial_tilt_once)
         self.create_timer(2.0, self._report_runtime_health)
@@ -146,6 +179,43 @@ class CmdBridgeNode(Node):
         )
 
         self.get_logger().info("cmd_bridge_node 시작됨 (갇힘 감지 포함)")
+
+    def _mapping_status_callback(self, message: String):
+        try:
+            payload = json.loads(message.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        with self.lock:
+            self._mapping_status = payload
+
+    def mapping_snapshot(self):
+        with self.lock:
+            return dict(self._mapping_status)
+
+    def mapping_command(self, command_type: str, timeout: float = 3.0):
+        client = self.mapping_clients.get(command_type)
+        if client is None:
+            raise ValueError(f"unsupported mapping command: {command_type}")
+        if not client.wait_for_service(timeout_sec=0.4):
+            raise RuntimeError(
+                "매핑 런타임이 실행되지 않았습니다. mapping-runtime을 먼저 시작하세요."
+            )
+        future = client.call_async(Trigger.Request())
+        completed = threading.Event()
+        future.add_done_callback(lambda _future: completed.set())
+        if not completed.wait(timeout):
+            raise TimeoutError("mapping service response timeout")
+        try:
+            response = future.result()
+        except Exception as error:
+            raise RuntimeError(f"mapping service failed: {error}") from error
+        if response is None:
+            raise RuntimeError("mapping service returned no response")
+        if not response.success:
+            raise RuntimeError(str(response.message or "mapping command rejected"))
+        return str(response.message or command_type)
 
     def _amcl_pose_callback(self, message: PoseWithCovarianceStamped):
         pose = message.pose.pose
@@ -620,8 +690,13 @@ class CmdBridgeNode(Node):
                 break
         if len(header_tokens) < 4 or header_tokens[0] not in {b"P2", b"P5"}:
             raise ValueError("invalid PGM map")
-        return {
-            "image_base64": base64.b64encode(image_data).decode("ascii"),
+        payload = {
+            # Orchard maps grow quickly.  Deflate the PGM before base64 so the
+            # gateway can transfer large mostly-uniform occupancy grids.
+            "image_base64": base64.b64encode(zlib.compress(image_data, 6)).decode(
+                "ascii"
+            ),
+            "image_encoding": "zlib+base64",
             "width": int(header_tokens[1]),
             "height": int(header_tokens[2]),
             "resolution": float(metadata["resolution"]),
@@ -632,6 +707,18 @@ class CmdBridgeNode(Node):
             "occupied_thresh": float(metadata.get("occupied_thresh", "0.65")),
             "free_thresh": float(metadata.get("free_thresh", "0.25")),
         }
+        try:
+            if os.path.getmtime(MAP_TEXTURE_PATH) < os.path.getmtime(image_path):
+                raise OSError("camera texture is older than occupancy map")
+            with open(MAP_TEXTURE_PATH, "rb") as texture_file:
+                texture_data = texture_file.read()
+            payload["texture_base64"] = base64.b64encode(texture_data).decode(
+                "ascii"
+            )
+            payload["texture_format"] = "png"
+        except OSError:
+            pass
+        return payload
 
     def _fill_with_desired(self, twist: Twist):
         with self.lock:
@@ -704,6 +791,25 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
         node.cancel_navigation()
     elif command_type == "map_request":
         response["map"] = node.load_map_payload()
+    elif command_type in {
+        "mapping_start",
+        "mapping_stop",
+        "mapping_save",
+        "mapping_preview",
+    }:
+        try:
+            message = node.mapping_command(command_type)
+            response["command_result"] = {
+                "type": command_type,
+                "ok": True,
+                "message": message,
+            }
+        except (RuntimeError, TimeoutError, ValueError) as error:
+            response["command_result"] = {
+                "type": command_type,
+                "ok": False,
+                "message": str(error),
+            }
     elif cmd.get("heartbeat") and not cmd.get("emergency_stop"):
         # Connection liveness is not a motor command. In particular, it must
         # not take /cmd_vel ownership away from a standalone Nav2 session.
@@ -716,6 +822,9 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
             bool(cmd.get("emergency_stop", False)),
         )
     response["navigation"] = node.navigation_snapshot()
+    mapping_snapshot = getattr(node, "mapping_snapshot", None)
+    if callable(mapping_snapshot):
+        response["mapping"] = mapping_snapshot()
     return response
 
 

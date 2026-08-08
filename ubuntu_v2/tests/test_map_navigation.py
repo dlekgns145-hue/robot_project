@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import math
+import base64
 import sys
 import unittest
+import zlib
 from pathlib import Path
 
 
 GUI_DIR = Path(__file__).resolve().parents[1] / "desktop_gui"
 sys.path.insert(0, str(GUI_DIR))
 
-from map_navigation import MapMetadata, pixel_to_world, world_to_pixel  # noqa: E402
+from map_navigation import (  # noqa: E402
+    MapMetadata,
+    decode_map_image,
+    pixel_to_world,
+    world_to_pixel,
+)
 
 
 class MapCoordinateTests(unittest.TestCase):
@@ -30,6 +37,15 @@ class MapCoordinateTests(unittest.TestCase):
 
         self.assertAlmostEqual(pixel[0], 4.0)
         self.assertAlmostEqual(pixel[1], 8.0)
+
+    def test_compressed_map_transfer_is_decoded(self) -> None:
+        pgm = b"P5\n2 2\n255\n\x00\xff\xff\x00"
+        payload = {
+            "image_base64": base64.b64encode(zlib.compress(pgm)).decode("ascii"),
+            "image_encoding": "zlib+base64",
+        }
+
+        self.assertEqual(decode_map_image(payload), pgm)
 
 
 if __name__ == "__main__":

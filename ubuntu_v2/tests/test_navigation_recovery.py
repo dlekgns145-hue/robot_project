@@ -89,6 +89,48 @@ class NavigationRecoveryTests(unittest.TestCase):
             self.scan_filter.is_self_reflection(math.radians(-150.0), 0.5)
         )
 
+    def test_slam_spatial_filter_removes_only_isolated_return(self) -> None:
+        filtered = self.scan_filter.remove_spatial_speckles(
+            [math.inf, 1.0, math.inf, 2.0, 2.03, math.inf],
+            radius=1,
+            tolerance=0.12,
+        )
+
+        self.assertTrue(math.isinf(filtered[1]))
+        self.assertAlmostEqual(filtered[3], 2.0)
+        self.assertAlmostEqual(filtered[4], 2.03)
+
+    def test_slam_temporal_filter_rejects_one_frame_speckle(self) -> None:
+        filter_ = self.scan_filter.TemporalMedianFilter(window=3, minimum_hits=2)
+
+        first = filter_.update([1.0, math.inf])
+        second = filter_.update([math.inf, 2.0])
+        third = filter_.update([math.inf, 2.05])
+
+        self.assertTrue(math.isinf(first[0]))
+        self.assertTrue(math.isinf(second[0]))
+        self.assertTrue(math.isinf(third[0]))
+        self.assertAlmostEqual(third[1], 2.025)
+
+    def test_slam_temporal_filter_rejects_inconsistent_repeated_noise(self) -> None:
+        filter_ = self.scan_filter.TemporalMedianFilter(
+            window=3, minimum_hits=2, tolerance=0.15
+        )
+
+        filter_.update([0.7])
+        filter_.update([2.4])
+        result = filter_.update([math.inf])
+
+        self.assertTrue(math.isinf(result[0]))
+
+    def test_slam_filter_warms_up_before_first_publish(self) -> None:
+        filter_ = self.scan_filter.TemporalMedianFilter(window=3, minimum_hits=2)
+
+        filter_.update([1.0])
+        self.assertFalse(filter_.ready)
+        filter_.update([1.02])
+        self.assertTrue(filter_.ready)
+
     def test_scan_indices_are_grouped_into_contiguous_runs(self) -> None:
         self.assertEqual(
             self.scan_diagnostics.contiguous_runs([1, 2, 3, 8, 10, 11]),
@@ -99,6 +141,9 @@ class NavigationRecoveryTests(unittest.TestCase):
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
         launch_text = (docker_dir / "mapping_runtime_launch.py").read_text()
         params_text = (docker_dir / "mapping_slam_params.yaml").read_text()
+        nav_params_text = (
+            docker_dir / "recovered" / "dwb_nav_params_fixed.yaml"
+        ).read_text()
 
         self.assertIn('SetRemap(src="/tf", dst="/tf_nav")', launch_text)
         self.assertIn('("/tf", "/tf_nav")', launch_text)
@@ -106,10 +151,18 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("odom_relay.py", launch_text)
         self.assertIn("navigation_launch.py", launch_text)
         self.assertIn("autonomous_mapping.py", launch_text)
+        self.assertIn("map_texture_recorder.py", launch_text)
+        self.assertIn("camera_obstacle_guard.py", launch_text)
+        self.assertIn("output_topic:=/scan_slam", launch_text)
+        self.assertIn("temporal_window:=3", launch_text)
+        self.assertIn("RewrittenYaml", launch_text)
+        self.assertIn('{"yaw_goal_tolerance": "3.14"}', launch_text)
         self.assertIn('default_value="false"', launch_text)
-        self.assertIn("scan_topic: /scan_fixed", params_text)
+        self.assertIn("scan_topic: /scan_slam", params_text)
         self.assertIn("odom_frame: odom", params_text)
         self.assertIn("base_frame: base_footprint", params_text)
+        self.assertIn("observation_sources: scan camera", nav_params_text)
+        self.assertIn("topic: /camera_scan", nav_params_text)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
@@ -122,6 +175,7 @@ class NavigationRecoveryTests(unittest.TestCase):
 
         self.assertIn("/opt/robot-control/maps/orchard_map.yaml", launch_text)
         self.assertIn('"autostart": "true"', launch_text)
+        self.assertIn("camera_obstacle_guard.py", launch_text)
         self.assertIn("navigation-runtime:", compose_text)
         self.assertIn('profiles: [navigation]', compose_text)
         self.assertIn('command: ["navigation"]', compose_text)

@@ -16,6 +16,7 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
+from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
@@ -26,6 +27,15 @@ def generate_launch_description():
     nav_params_path = LaunchConfiguration("nav_params_file")
     exploration_enabled = LaunchConfiguration("exploration_enabled")
     map_output = LaunchConfiguration("map_output")
+    # Frontier exploration cares about reaching the free cell, not finishing
+    # at an exact heading.  Keep normal saved-map navigation at its stricter
+    # yaw tolerance and relax it only inside the mapping runtime.
+    mapping_nav_params = RewrittenYaml(
+        source_file=nav_params_path,
+        root_key="",
+        param_rewrites={"yaw_goal_tolerance": "3.14"},
+        convert_types=True,
+    )
 
     return LaunchDescription(
         [
@@ -51,8 +61,41 @@ def generate_launch_description():
                             "python3",
                             f"{runtime_dir}/scan_time_fix.py",
                             "--ros-args",
+                            "-r",
+                            "__node:=navigation_scan_filter",
+                            "-p",
+                            "output_topic:=/scan_fixed",
+                        ],
+                        output="screen",
+                    ),
+                    ExecuteProcess(
+                        cmd=[
+                            "python3",
+                            f"{runtime_dir}/scan_time_fix.py",
+                            "--ros-args",
+                            "-r",
+                            "__node:=slam_scan_filter",
+                            "-p",
+                            "output_topic:=/scan_slam",
                             "-p",
                             "max_publish_hz:=5.0",
+                            "-p",
+                            "spatial_filter_radius:=2",
+                            "-p",
+                            "spatial_tolerance:=0.12",
+                            "-p",
+                            "temporal_window:=3",
+                            "-p",
+                            "temporal_minimum_hits:=2",
+                            "-p",
+                            "temporal_tolerance:=0.15",
+                        ],
+                        output="screen",
+                    ),
+                    ExecuteProcess(
+                        cmd=[
+                            "python3",
+                            f"{runtime_dir}/camera_obstacle_guard.py",
                         ],
                         output="screen",
                     ),
@@ -83,7 +126,7 @@ def generate_launch_description():
                         ),
                         launch_arguments={
                             "use_sim_time": use_sim_time,
-                            "params_file": nav_params_path,
+                            "params_file": mapping_nav_params,
                             "autostart": "true",
                             "use_composition": "False",
                         }.items(),
@@ -132,6 +175,16 @@ def generate_launch_description():
                             ["start_enabled:=", exploration_enabled],
                             "-p",
                             ["map_output:=", map_output],
+                        ],
+                        output="screen",
+                    ),
+                    ExecuteProcess(
+                        cmd=[
+                            "python3",
+                            f"{runtime_dir}/map_texture_recorder.py",
+                            "--ros-args",
+                            "-r",
+                            "/tf:=/tf_nav",
                         ],
                         output="screen",
                     ),

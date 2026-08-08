@@ -90,6 +90,17 @@ class GatewayProtocolTests(unittest.TestCase):
         )
         self.assertEqual(legacy_payload({"type": "map_request"}), {"type": "map_request"})
 
+    def test_mapping_commands_are_forwarded(self) -> None:
+        for command_type in (
+            "mapping_start",
+            "mapping_stop",
+            "mapping_save",
+            "mapping_preview",
+        ):
+            self.assertEqual(
+                legacy_payload({"type": command_type}), {"type": command_type}
+            )
+
     def test_relay_connects_and_sends_to_legacy_robot(self) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))

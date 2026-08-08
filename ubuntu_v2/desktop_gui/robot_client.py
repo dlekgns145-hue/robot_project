@@ -90,6 +90,21 @@ class RobotClient(QThread):
         with self._command_lock:
             self._pending_commands.append({"type": "map_request"})
 
+    def mapping_action(self, action: str) -> None:
+        command_type = f"mapping_{action}"
+        if command_type not in {
+            "mapping_start",
+            "mapping_stop",
+            "mapping_save",
+            "mapping_preview",
+        }:
+            raise ValueError(f"unsupported mapping action: {action}")
+        if self._shutdown_requested.is_set():
+            return
+        with self._command_lock:
+            self._pending_commands.append({"type": command_type})
+            self._command = {"type": "ping"}
+
     def release_control(self) -> None:
         """Keep status polling alive without publishing a motor command."""
 
@@ -159,19 +174,24 @@ class RobotClient(QThread):
     def _read_line(
         self, connection: socket.socket, buffer: bytearray
     ) -> tuple[bytes, bytearray]:
-        deadline = time.monotonic() + 0.8
+        # A saved orchard map can include a compressed camera texture.  Allow
+        # enough time for that one large response while preserving the regular
+        # 10 Hz heartbeat cadence after it arrives.
+        deadline = time.monotonic() + 10.0
         while b"\n" not in buffer:
             if self._stop_event.is_set():
                 raise ConnectionAbortedError("client stopping")
             if time.monotonic() > deadline:
                 raise TimeoutError("robot status timeout")
             try:
-                chunk = connection.recv(4096)
+                chunk = connection.recv(65_536)
             except socket.timeout:
                 continue
             if not chunk:
                 raise ConnectionResetError("robot closed the connection")
             buffer.extend(chunk)
+            if len(buffer) > 32 * 1024 * 1024:
+                raise ValueError("gateway response exceeded 32 MiB")
         line, _, remainder = buffer.partition(b"\n")
         return bytes(line), bytearray(remainder)
 
@@ -189,7 +209,7 @@ class RobotClient(QThread):
                     connection.settimeout(0.2)
                     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    self.connection_changed.emit(True, "Ubuntu VM 게이트웨이 연결됨")
+                    self.connection_changed.emit(True, "로봇 제어 서버 연결됨")
                     buffer = bytearray()
                     next_send = time.monotonic()
                     while not self._stop_event.is_set():
@@ -206,7 +226,11 @@ class RobotClient(QThread):
                         connection.sendall(payload)
                         line, buffer = self._read_line(connection, buffer)
                         response = json.loads(line)
-                        if response.get("type") == "status":
+                        is_direct_status = bool(response.get("ok")) and any(
+                            key in response
+                            for key in ("navigation", "mapping", "map")
+                        )
+                        if response.get("type") == "status" or is_direct_status:
                             operations = response.pop("operations", None)
                             map_payload = response.pop("map", None)
                             if isinstance(map_payload, dict):
@@ -218,9 +242,14 @@ class RobotClient(QThread):
                                 if "robots" in operations:
                                     self.operations_received.emit(operations)
                             self.status_received.emit(response)
-                        elif response.get("type") == "error":
+                        elif (
+                            response.get("type") == "error"
+                            or response.get("ok") is False
+                        ):
                             raise ValueError(
-                                response.get("message", "robot rejected command")
+                                response.get("message")
+                                or response.get("error")
+                                or "robot rejected command"
                             )
                         else:
                             self.log_message.emit(str(response))

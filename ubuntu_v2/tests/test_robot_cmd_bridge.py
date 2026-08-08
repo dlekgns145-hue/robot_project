@@ -19,6 +19,16 @@ class Twist:
         self.angular = types.SimpleNamespace(z=0.0)
 
 
+class String:
+    def __init__(self) -> None:
+        self.data = ""
+
+
+class Trigger:
+    class Request:
+        pass
+
+
 class RecordingPublisher:
     def __init__(self) -> None:
         self.messages: list[Twist] = []
@@ -33,6 +43,10 @@ def load_bridge_module():
     rclpy_node.Node = FakeNode
     rclpy_action = types.ModuleType("rclpy.action")
     rclpy_action.ActionClient = type("ActionClient", (), {})
+    rclpy_qos = types.ModuleType("rclpy.qos")
+    rclpy_qos.DurabilityPolicy = types.SimpleNamespace(TRANSIENT_LOCAL=1)
+    rclpy_qos.ReliabilityPolicy = types.SimpleNamespace(RELIABLE=1)
+    rclpy_qos.QoSProfile = type("QoSProfile", (), {})
     action_msgs = types.ModuleType("action_msgs")
     action_msgs_msg = types.ModuleType("action_msgs.msg")
     action_msgs_msg.GoalStatus = types.SimpleNamespace(
@@ -54,13 +68,16 @@ def load_bridge_module():
     std_msgs_msg = types.ModuleType("std_msgs.msg")
     std_msgs_msg.Bool = type("Bool", (), {})
     std_msgs_msg.Int32 = type("Int32", (), {})
+    std_msgs_msg.String = String
     std_srvs = types.ModuleType("std_srvs")
     std_srvs_srv = types.ModuleType("std_srvs.srv")
     std_srvs_srv.SetBool = type("SetBool", (), {})
+    std_srvs_srv.Trigger = Trigger
     stubs = {
         "rclpy": rclpy,
         "rclpy.node": rclpy_node,
         "rclpy.action": rclpy_action,
+        "rclpy.qos": rclpy_qos,
         "action_msgs": action_msgs,
         "action_msgs.msg": action_msgs_msg,
         "nav2_msgs": nav2_msgs,
@@ -173,6 +190,22 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertEqual(goals, [(1.2, -0.4, 0.5)])
         self.assertTrue(response["ok"])
         self.assertTrue(response["navigation"]["active"])
+
+    def test_mapping_command_and_status_are_returned(self) -> None:
+        commands = []
+        node = types.SimpleNamespace(
+            mapping_command=lambda command: commands.append(command) or "started",
+            mapping_snapshot=lambda: {"state": "starting", "enabled": True},
+            navigation_snapshot=lambda: {"state": "idle", "active": False},
+        )
+
+        response = self.bridge.handle_socket_command(
+            node, {"type": "mapping_start"}
+        )
+
+        self.assertEqual(commands, ["mapping_start"])
+        self.assertTrue(response["command_result"]["ok"])
+        self.assertTrue(response["mapping"]["enabled"])
 
 
 if __name__ == "__main__":

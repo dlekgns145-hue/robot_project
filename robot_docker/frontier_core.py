@@ -137,6 +137,26 @@ def reachable_free_cell_indices(
     ``allow_unknown`` is disabled, so those cells must not become goals.
     """
 
+    reachable, _parents = _reachable_free_tree(
+        data,
+        spec,
+        robot_x=robot_x,
+        robot_y=robot_y,
+        free_max=free_max,
+    )
+    return reachable
+
+
+def _reachable_free_tree(
+    data: Sequence[int],
+    spec: GridSpec,
+    *,
+    robot_x: float,
+    robot_y: float,
+    free_max: int = 20,
+) -> tuple[set[int], dict[int, int | None]]:
+    """Return the robot-connected free cells and a shortest-path parent tree."""
+
     expected = spec.width * spec.height
     if spec.width <= 0 or spec.height <= 0 or len(data) != expected:
         raise ValueError(f"grid data has {len(data)} cells; expected {expected}")
@@ -146,7 +166,7 @@ def reachable_free_cell_indices(
         index for index, value in enumerate(data) if 0 <= value <= free_max
     }
     if not free_cells:
-        return set()
+        return set(), {}
 
     if 0 <= robot_grid_x < spec.width and 0 <= robot_grid_y < spec.height:
         seed = robot_grid_y * spec.width + robot_grid_x
@@ -164,15 +184,38 @@ def reachable_free_cell_indices(
         )
 
     reachable = {seed}
+    parents: dict[int, int | None] = {seed: None}
     pending = [seed]
-    while pending:
-        current = pending.pop()
+    pending_index = 0
+    while pending_index < len(pending):
+        current = pending[pending_index]
+        pending_index += 1
         for neighbor in _neighbors4(current, spec.width, spec.height):
             if neighbor not in free_cells or neighbor in reachable:
                 continue
             reachable.add(neighbor)
+            parents[neighbor] = current
             pending.append(neighbor)
-    return reachable
+    return reachable, parents
+
+
+def _staged_path_cell(
+    target: int,
+    parents: dict[int, int | None],
+    *,
+    resolution: float,
+    maximum_step_distance: float,
+) -> int:
+    """Pull a far target back along its known-free shortest path."""
+
+    if maximum_step_distance <= 0.0 or target not in parents:
+        return target
+    reverse_path = [target]
+    while parents[reverse_path[-1]] is not None:
+        reverse_path.append(parents[reverse_path[-1]])
+    path = list(reversed(reverse_path))
+    maximum_steps = max(1, math.floor(maximum_step_distance / resolution))
+    return path[min(maximum_steps, len(path) - 1)]
 
 
 def frontier_candidates(
@@ -189,6 +232,7 @@ def frontier_candidates(
     gain_weight: float = 1.0,
     distance_weight: float = 0.45,
     goal_standoff: float = 0.0,
+    maximum_goal_step_distance: float = 0.0,
 ) -> list[FrontierCandidate]:
     """Return scored, reachable frontier approach goals, best first.
 
@@ -199,7 +243,7 @@ def frontier_candidates(
 
     frontiers = frontier_cell_indices(data, spec)
     clusters = cluster_frontiers(frontiers, spec)
-    reachable = reachable_free_cell_indices(
+    reachable, parents = _reachable_free_tree(
         data,
         spec,
         robot_x=robot_x,
@@ -212,7 +256,7 @@ def frontier_candidates(
             continue
         centroid_x = sum(index % spec.width for index in cluster) / len(cluster)
         centroid_y = sum(index // spec.width for index in cluster) / len(cluster)
-        usable_cells: list[tuple[int, int, float, float, float]] = []
+        usable_cells: list[tuple[int, int, float, float, float, float]] = []
         for index in cluster:
             if index not in reachable:
                 continue
@@ -267,12 +311,24 @@ def frontier_candidates(
                     if nearby:
                         approach_index = min(nearby)[1]
 
-            grid_x = approach_index % spec.width
-            grid_y = approach_index // spec.width
+            target_grid_x = approach_index % spec.width
+            target_grid_y = approach_index // spec.width
+            target_x, target_y = grid_cell_to_world(
+                target_grid_x, target_grid_y, spec
+            )
+            target_distance = math.hypot(target_x - robot_x, target_y - robot_y)
+            if target_distance < min_distance or target_distance > max_distance:
+                continue
+            staged_index = _staged_path_cell(
+                approach_index,
+                parents,
+                resolution=spec.resolution,
+                maximum_step_distance=maximum_goal_step_distance,
+            )
+            grid_x = staged_index % spec.width
+            grid_y = staged_index // spec.width
             world_x, world_y = grid_cell_to_world(grid_x, grid_y, spec)
             distance = math.hypot(world_x - robot_x, world_y - robot_y)
-            if distance < min_distance or distance > max_distance:
-                continue
             if any(
                 math.hypot(world_x - blocked_x, world_y - blocked_y)
                 <= blacklist_radius
@@ -280,12 +336,19 @@ def frontier_candidates(
             ):
                 continue
             usable_cells.append(
-                (index, approach_index, world_x, world_y, distance)
+                (
+                    index,
+                    staged_index,
+                    world_x,
+                    world_y,
+                    distance,
+                    target_distance,
+                )
             )
         if not usable_cells:
             continue
 
-        representative, approach, world_x, world_y, distance = min(
+        representative, approach, world_x, world_y, distance, target_distance = min(
             usable_cells,
             key=lambda item: (
                 (item[0] % spec.width - centroid_x) ** 2
@@ -297,7 +360,7 @@ def frontier_candidates(
         grid_y = approach // spec.width
 
         frontier_length = len(cluster) * spec.resolution
-        score = gain_weight * frontier_length - distance_weight * distance
+        score = gain_weight * frontier_length - distance_weight * target_distance
         candidates.append(
             FrontierCandidate(
                 grid_x=grid_x,

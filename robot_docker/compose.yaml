@@ -95,6 +95,7 @@ services:
     depends_on:
       - agent
       - base
+      - camera
     volumes:
       - ./maps:/opt/robot-control/maps
 
@@ -113,5 +114,6 @@ services:
     depends_on:
       - agent
       - base
+      - camera
     volumes:
       - ./maps:/opt/robot-control/maps:ro

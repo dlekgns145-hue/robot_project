@@ -221,7 +221,7 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan
+        observation_sources: scan camera
         scan:
           topic: /scan_fixed
           max_obstacle_height: 2.0
@@ -232,6 +232,19 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
+        # Monocular ranges are approximate, so camera observations live only
+        # in this rolling costmap and never become persistent map obstacles.
+        camera:
+          topic: /camera_scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          inf_is_valid: True
+          raytrace_max_range: 2.0
+          raytrace_min_range: 0.22
+          obstacle_max_range: 1.9
+          obstacle_min_range: 0.22
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True

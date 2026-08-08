@@ -27,6 +27,8 @@ ROBOT_PORT = env_int("ROBOT_PORT", 9999)
 ROBOT_CONNECT_TIMEOUT = env_float("ROBOT_CONNECT_TIMEOUT_SEC", 1.5)
 ROBOT_RECONNECT_INTERVAL = env_float("ROBOT_RECONNECT_INTERVAL_SEC", 10.0)
 ROBOT_HEARTBEAT_INTERVAL = env_float("ROBOT_HEARTBEAT_INTERVAL_SEC", 1.0)
+ROBOT_RESPONSE_TIMEOUT = env_float("ROBOT_RESPONSE_TIMEOUT_SEC", 8.0)
+ROBOT_RESPONSE_MAX_BYTES = env_int("ROBOT_RESPONSE_MAX_BYTES", 16 * 1024 * 1024)
 OPERATIONS_DB_PATH = os.getenv(
     "OPERATIONS_DB_PATH", "/var/lib/robot-control-v2/operations.sqlite3"
 )
@@ -48,6 +50,13 @@ def legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return {"type": "navigation_cancel"}
     if command_type == "map_request":
         return {"type": "map_request"}
+    if command_type in {
+        "mapping_start",
+        "mapping_stop",
+        "mapping_save",
+        "mapping_preview",
+    }:
+        return {"type": command_type}
     if command_type == "navigate":
         x = float(payload["x"])
         y = float(payload["y"])
@@ -218,7 +227,7 @@ class RobotRelay:
             raise ConnectionError("robot bridge is not connected")
         encoded = json.dumps(command, separators=(",", ":")).encode() + b"\n"
         self.connection.sendall(encoded)
-        deadline = time.monotonic() + max(2.0, ROBOT_CONNECT_TIMEOUT)
+        deadline = time.monotonic() + max(2.0, ROBOT_RESPONSE_TIMEOUT)
         while b"\n" not in self._response_buffer:
             if time.monotonic() > deadline:
                 raise TimeoutError("robot bridge response timeout")
@@ -229,8 +238,10 @@ class RobotRelay:
             if not chunk:
                 raise ConnectionResetError("robot bridge closed the connection")
             self._response_buffer.extend(chunk)
-            if len(self._response_buffer) > 2_097_152:
-                raise ValueError("robot response exceeded 2 MiB")
+            if len(self._response_buffer) > ROBOT_RESPONSE_MAX_BYTES:
+                raise ValueError(
+                    f"robot response exceeded {ROBOT_RESPONSE_MAX_BYTES} bytes"
+                )
         raw, _, remainder = self._response_buffer.partition(b"\n")
         self._response_buffer = bytearray(remainder)
         response = json.loads(raw)
@@ -322,6 +333,12 @@ class RobotRelay:
             map_payload = self._robot_response.get("map")
             if isinstance(map_payload, dict):
                 status["map"] = dict(map_payload)
+            mapping = self._robot_response.get("mapping")
+            if isinstance(mapping, dict):
+                status["mapping"] = dict(mapping)
+            command_result = self._robot_response.get("command_result")
+            if isinstance(command_result, dict):
+                status["command_result"] = dict(command_result)
             return status
 
 

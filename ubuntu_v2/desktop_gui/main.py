@@ -61,6 +61,9 @@ class MainWindow(QMainWindow):
         self.follow_active = False
         self.vision_mode: str | None = None
         self._navigation_active = False
+        self._mapping_active = False
+        self._last_saved_map = ""
+        self._last_mapping_result: tuple[str, bool, str] | None = None
         self._map_requested_for_ip = ""
         self._manual_keys: set[int] = set()
         self._build_ui()
@@ -447,7 +450,9 @@ class MainWindow(QMainWindow):
         self.map_view.goal_selected.connect(self._on_map_goal_selected)
         self.map_view.selection_rejected.connect(self.append_log)
         map_layout.addWidget(self.map_view, 1)
-        legend = QLabel("파란색: 로봇 위치 · 주황색: 선택 목표 · 흰색: 주행 가능 영역")
+        legend = QLabel(
+            "파란색: 로봇 위치 · 주황색: 선택 목표 · 어두운 영역: LiDAR 장애물"
+        )
         legend.setObjectName("ControlHint")
         legend.setAlignment(Qt.AlignmentFlag.AlignCenter)
         map_layout.addWidget(legend)
@@ -475,6 +480,44 @@ class MainWindow(QMainWindow):
         self.navigation_status_label.setWordWrap(True)
         self.navigation_status_label.setObjectName("MetricValue")
         controls_layout.addWidget(self.navigation_status_label)
+
+        mapping_group = QGroupBox("현장 지도 만들기")
+        mapping_layout = QVBoxLayout(mapping_group)
+        mapping_hint = QLabel(
+            "로봇이 주변을 탐색하며 LiDAR 지도를 만들고, 카메라 화면을 지도 위에 합성합니다."
+        )
+        mapping_hint.setWordWrap(True)
+        mapping_hint.setObjectName("ControlHint")
+        mapping_layout.addWidget(mapping_hint)
+        self.mapping_status_label = QLabel("매핑 런타임 대기 중")
+        self.mapping_status_label.setWordWrap(True)
+        self.mapping_status_label.setObjectName("MetricValue")
+        mapping_layout.addWidget(self.mapping_status_label)
+        mapping_buttons = QGridLayout()
+        self.mapping_start_button = QPushButton("자동 매핑 시작")
+        self.mapping_start_button.setProperty("role", "primary")
+        self.mapping_start_button.clicked.connect(self.start_mapping)
+        self.mapping_stop_button = QPushButton("매핑 정지")
+        self.mapping_stop_button.clicked.connect(self.stop_mapping)
+        self.mapping_save_button = QPushButton("현재 지도 저장")
+        self.mapping_save_button.clicked.connect(self.save_mapping)
+        self.mapping_preview_button = QPushButton("탐색 후보 확인")
+        self.mapping_preview_button.setProperty("role", "quiet")
+        self.mapping_preview_button.clicked.connect(self.preview_mapping)
+        for button in (
+            self.mapping_start_button,
+            self.mapping_stop_button,
+            self.mapping_save_button,
+            self.mapping_preview_button,
+        ):
+            button.setMinimumHeight(38)
+            button.setEnabled(False)
+        mapping_buttons.addWidget(self.mapping_start_button, 0, 0)
+        mapping_buttons.addWidget(self.mapping_stop_button, 0, 1)
+        mapping_buttons.addWidget(self.mapping_save_button, 1, 0)
+        mapping_buttons.addWidget(self.mapping_preview_button, 1, 1)
+        mapping_layout.addLayout(mapping_buttons)
+        controls_layout.addWidget(mapping_group)
         controls_layout.addStretch(1)
         refresh_button = QPushButton("저장 지도 새로고침")
         refresh_button.clicked.connect(self.refresh_map)
@@ -722,6 +765,8 @@ class MainWindow(QMainWindow):
         self.current_robot_ip = ""
         self._last_robot_state = None
         self._map_requested_for_ip = ""
+        self._mapping_active = False
+        self._last_saved_map = ""
         self.connect_button.setText("서버에 연결")
         self.host_edit.setEnabled(True)
         self.command_port.setEnabled(True)
@@ -775,6 +820,13 @@ class MainWindow(QMainWindow):
             self.robot_address_label.setText("ROS 직접 연결")
             lidar_ok = bool(status.get("lidar_ok"))
             self.lidar_label.setText("정상" if lidar_ok else "데이터 없음/지연")
+            if (
+                self.robot_connected
+                and self.client is not None
+                and self._map_requested_for_ip != "direct"
+            ):
+                self._map_requested_for_ip = "direct"
+                self.client.request_map()
         distance = status.get("front_distance")
         self.distance_label.setText("-" if distance is None else f"{distance:.2f} m")
         self.avoid_label.setText(str(status.get("avoid_state", "-")))
@@ -785,6 +837,20 @@ class MainWindow(QMainWindow):
         navigation = status.get("navigation")
         if isinstance(navigation, dict):
             self._update_navigation_status(navigation)
+        mapping = status.get("mapping")
+        if isinstance(mapping, dict):
+            self._update_mapping_status(mapping)
+        command_result = status.get("command_result")
+        if isinstance(command_result, dict):
+            result_key = (
+                str(command_result.get("type") or ""),
+                bool(command_result.get("ok", False)),
+                str(command_result.get("message") or ""),
+            )
+            if result_key != self._last_mapping_result:
+                self._last_mapping_result = result_key
+                prefix = "완료" if result_key[1] else "실패"
+                self.append_log(f"매핑 명령 {prefix}: {result_key[2]}")
 
     def on_map_payload(self, payload: dict) -> None:
         try:
@@ -792,8 +858,9 @@ class MainWindow(QMainWindow):
             width = int(payload["width"])
             height = int(payload["height"])
             resolution = float(payload["resolution"])
+            texture_note = " · 카메라 오버레이" if self.map_view.has_texture else ""
             self.map_summary_label.setText(
-                f"{width * resolution:.2f} × {height * resolution:.2f} m"
+                f"{width * resolution:.2f} × {height * resolution:.2f} m{texture_note}"
             )
             self.append_log("로봇에서 저장 지도를 불러왔습니다")
         except (KeyError, TypeError, ValueError) as error:
@@ -826,7 +893,46 @@ class MainWindow(QMainWindow):
         self.navigation_button.setText(
             "Navigation 중지" if self._navigation_active else "Navigation"
         )
-        self.map_navigation_button.setEnabled(not self._navigation_active)
+        self.map_navigation_button.setEnabled(
+            not self._navigation_active and not self._mapping_active
+        )
+
+    def _update_mapping_status(self, mapping: dict) -> None:
+        state = str(mapping.get("state") or "idle")
+        self._mapping_active = bool(mapping.get("enabled", False))
+        message = str(mapping.get("message") or state)
+        map_sequence = mapping.get("map_sequence")
+        distance = mapping.get("distance_remaining")
+        details = []
+        if map_sequence is not None:
+            details.append(f"지도 갱신 {int(map_sequence)}회")
+        if distance is not None:
+            details.append(f"목표까지 {float(distance):.2f} m")
+        suffix = f" · {' · '.join(details)}" if details else ""
+        self.mapping_status_label.setText(f"{message}{suffix}")
+        available = state != "unavailable" and self.robot_connected
+        self.mapping_start_button.setEnabled(available and not self._mapping_active)
+        self.mapping_stop_button.setEnabled(available and self._mapping_active)
+        self.mapping_save_button.setEnabled(available)
+        self.mapping_preview_button.setEnabled(available)
+        self.navigation_button.setEnabled(not self._mapping_active)
+        self.map_navigation_button.setEnabled(
+            not self._mapping_active and not self._navigation_active
+        )
+
+        saved_map = str(mapping.get("saved_map") or "")
+        save_key = f"{saved_map}:{mapping.get('save_sequence', 0)}"
+        if saved_map and save_key != self._last_saved_map:
+            self._last_saved_map = save_key
+            self.map_summary_label.setText("저장 지도·카메라 오버레이 생성 중")
+            # The texture recorder runs just after map_saver. Retry so a plain
+            # occupancy response is naturally upgraded when compositing ends.
+            QTimer.singleShot(1200, self._request_map_after_save)
+            QTimer.singleShot(4500, self._request_map_after_save)
+
+    def _request_map_after_save(self) -> None:
+        if self.client is not None and self.robot_connected:
+            self.client.request_map()
 
     def on_operations_snapshot(self, snapshot: dict) -> None:
         self.operations_page.update_snapshot(snapshot)
@@ -973,6 +1079,49 @@ class MainWindow(QMainWindow):
         else:
             self.stop_navigation()
 
+    def start_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            QMessageBox.warning(self, "자동 매핑", "먼저 Ubuntu VM과 로봇에 연결하세요.")
+            return
+        if self._mapping_active:
+            return
+        answer = QMessageBox.question(
+            self,
+            "자동 매핑 출발 확인",
+            "로봇이 스스로 이동하며 주변을 탐색합니다.\n"
+            "작업 구역에 사람·동물·이동 장애물이 없고 비상 정지가 가능한 상태입니까?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.stop_vision()
+        self.stop_navigation()
+        self.client.mapping_action("start")
+        self.mapping_status_label.setText("자동 매핑 시작 요청 전송 중")
+        self.append_log("자동 매핑 시작 요청")
+
+    def stop_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            return
+        self.client.mapping_action("stop")
+        self.mapping_status_label.setText("매핑 정지 요청 전송 중")
+        self.append_log("매핑 정지 요청")
+
+    def save_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            QMessageBox.warning(self, "지도 저장", "먼저 Ubuntu VM과 로봇에 연결하세요.")
+            return
+        self.client.mapping_action("save")
+        self.mapping_status_label.setText("LiDAR 지도 저장 요청 전송 중")
+        self.append_log("현재 지도 저장 요청")
+
+    def preview_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            QMessageBox.warning(self, "탐색 후보", "먼저 Ubuntu VM과 로봇에 연결하세요.")
+            return
+        self.client.mapping_action("preview")
+        self.mapping_status_label.setText("탐색 가능한 영역 계산 중")
+        self.append_log("매핑 탐색 후보 확인 요청")
+
     def start_navigation(self) -> None:
         if self.client is None or not self.robot_connected:
             self.navigation_button.setChecked(False)
@@ -980,6 +1129,12 @@ class MainWindow(QMainWindow):
                 self,
                 "Navigation",
                 "먼저 Ubuntu VM과 로봇에 연결하세요.",
+            )
+            return
+        if self._mapping_active:
+            self.navigation_button.setChecked(False)
+            QMessageBox.warning(
+                self, "Navigation", "자동 매핑을 먼저 정지한 뒤 목표 주행을 시작하세요."
             )
             return
         if self._navigation_active:

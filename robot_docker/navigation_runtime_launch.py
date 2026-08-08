@@ -52,6 +52,13 @@ def generate_launch_description():
                     ExecuteProcess(
                         cmd=[
                             "python3",
+                            f"{runtime_dir}/camera_obstacle_guard.py",
+                        ],
+                        output="screen",
+                    ),
+                    ExecuteProcess(
+                        cmd=[
+                            "python3",
                             f"{runtime_dir}/odom_relay.py",
                             "--ros-args",
                             "-r",

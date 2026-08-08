@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import math
+import zlib
 from dataclasses import dataclass
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QLabel
@@ -59,6 +61,20 @@ def world_to_pixel(world_x: float, world_y: float, map_info: MapMetadata) -> tup
     )
 
 
+def decode_map_image(payload: dict) -> bytes:
+    """Decode occupancy data from both old and compressed robot bridges."""
+    raw = base64.b64decode(str(payload["image_base64"]), validate=True)
+    encoding = str(payload.get("image_encoding", "base64"))
+    if encoding == "zlib+base64":
+        try:
+            return zlib.decompress(raw)
+        except zlib.error as error:
+            raise ValueError(f"compressed map image could not be decoded: {error}") from error
+    if encoding not in ("", "base64"):
+        raise ValueError(f"unsupported map image encoding: {encoding}")
+    return raw
+
+
 class NavigationMapView(QLabel):
     goal_selected = Signal(float, float)
     selection_rejected = Signal(str)
@@ -70,6 +86,8 @@ class NavigationMapView(QLabel):
         self.setText("저장 지도를 불러오는 중입니다")
         self.setStyleSheet("background:#eef3f7; border-radius:12px; color:#65788b;")
         self._image: QImage | None = None
+        self._texture: QImage | None = None
+        self._obstacle_overlay: QImage | None = None
         self._map_info: MapMetadata | None = None
         self._goal: tuple[float, float] | None = None
         self._robot_pose: tuple[float, float, float] | None = None
@@ -78,18 +96,55 @@ class NavigationMapView(QLabel):
     def has_map(self) -> bool:
         return self._image is not None and self._map_info is not None
 
+    @property
+    def has_texture(self) -> bool:
+        return self._texture is not None
+
     def set_map_payload(self, payload: dict) -> None:
         map_info = MapMetadata.from_payload(payload)
-        raw = base64.b64decode(str(payload["image_base64"]), validate=True)
+        raw = decode_map_image(payload)
         image = QImage.fromData(raw)
         if image.isNull():
             raise ValueError("PGM map image could not be decoded")
         if image.width() != map_info.width or image.height() != map_info.height:
             raise ValueError("map image and metadata dimensions differ")
         self._image = image.convertToFormat(QImage.Format.Format_Grayscale8)
+        self._texture = None
+        texture_data = payload.get("texture_base64")
+        if texture_data:
+            texture_raw = base64.b64decode(str(texture_data), validate=True)
+            texture = QImage.fromData(texture_raw)
+            if texture.isNull():
+                raise ValueError("camera overlay image could not be decoded")
+            if texture.size() != self._image.size():
+                raise ValueError("camera overlay and occupancy map dimensions differ")
+            self._texture = texture.convertToFormat(QImage.Format.Format_RGB888)
+        self._obstacle_overlay = self._make_obstacle_overlay(self._image)
         self._map_info = map_info
         self.setText("")
         self.update()
+
+    @staticmethod
+    def _make_obstacle_overlay(occupancy: QImage) -> QImage:
+        height = occupancy.height()
+        width = occupancy.width()
+        stride = occupancy.bytesPerLine()
+        gray = np.frombuffer(occupancy.constBits(), dtype=np.uint8).reshape(
+            height, stride
+        )[:, :width]
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        occupied = gray < 65
+        unknown = (gray >= 65) & (gray < 250)
+        rgba[occupied] = (18, 25, 31, 205)
+        rgba[unknown] = (105, 115, 125, 58)
+        overlay = QImage(
+            rgba.data,
+            width,
+            height,
+            rgba.strides[0],
+            QImage.Format.Format_RGBA8888,
+        )
+        return overlay.copy()
 
     def set_goal(self, x: float, y: float) -> None:
         self._goal = (float(x), float(y))
@@ -134,7 +189,10 @@ class NavigationMapView(QLabel):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#eef3f7"))
         image_rect = self._image_rect()
-        painter.drawImage(image_rect, self._image)
+        display_image = self._texture if self._texture is not None else self._image
+        painter.drawImage(image_rect, display_image)
+        if self._texture is not None and self._obstacle_overlay is not None:
+            painter.drawImage(image_rect, self._obstacle_overlay)
         painter.setPen(QPen(QColor("#bdcbd7"), 1))
         painter.drawRect(image_rect)
 

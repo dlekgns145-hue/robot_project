@@ -10,7 +10,9 @@ slam_toolbox:
     odom_frame: odom
     map_frame: map
     base_frame: base_footprint
-    scan_topic: /scan_fixed
+    # A 3-frame median and spatial consistency filter remove transient speckles.
+    # Nav2 keeps the lower-latency /scan_fixed stream for obstacle safety.
+    scan_topic: /scan_slam
     use_map_saver: true
     mode: mapping
 
