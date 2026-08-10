@@ -1,8 +1,10 @@
 __pycache__/
 *.pyc
+*.pyo
 .DS_Store
 .ruff_cache/
 **/.venv/
+dist/
 build/
 install/
 log/

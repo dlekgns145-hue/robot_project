@@ -50,10 +50,15 @@ from std_srvs.srv import SetBool, Trigger
 HOST = "0.0.0.0"
 PORT = 9999
 COMMAND_TIMEOUT = 0.5
+SERVER_COMMAND_TIMEOUT = float(os.getenv("SERVER_COMMAND_TIMEOUT_SEC", "0.5"))
+SERVER_MAX_LINEAR_SPEED = float(os.getenv("SERVER_MAX_LINEAR_SPEED", "0.12"))
+SERVER_MAX_ANGULAR_SPEED = float(os.getenv("SERVER_MAX_ANGULAR_SPEED", "0.18"))
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
 LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
 MAP_TEXTURE_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_texture.png"
+MAP_OBSTACLE_TEXTURE_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_obstacles.png"
+MAP_MATERIALS_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_materials.json"
 
 OBSTACLE_AVOIDANCE_ENABLED = True
 OBSTACLE_STOP_DISTANCE_M = 0.40
@@ -71,6 +76,9 @@ BACKUP_SPEED = -0.20
 
 LIDAR_MIN_VALID_RANGE = 0.02
 LIDAR_STALE_SEC = 2.0
+CAMERA_STALE_SEC = 1.0
+CAMERA_STOP_DISTANCE_M = 0.45
+CAMERA_CRITICAL_DISTANCE_M = 0.30
 
 SMOOTHING_WINDOW = 5
 
@@ -107,6 +115,9 @@ class CmdBridgeNode(Node):
         # While this lock is active, socket commands cannot overwrite Nav2's
         # /cmd_vel output. Emergency stop remains available in every mode.
         self.navigation_mode = False
+        self.server_linear = 0.0
+        self.server_angular = 0.0
+        self.last_server_cmd_at = 0.0
         self.navigator = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self._remote_nav_state = "idle"
         self._remote_nav_active = False
@@ -129,6 +140,8 @@ class CmdBridgeNode(Node):
         self.front_blocked = False
         self.front_min_dist = 10.0
         self._last_scan_at = 0.0
+        self.camera_front_min_dist = float("inf")
+        self._last_camera_scan_at = 0.0
 
         self.left_history = deque(maxlen=SMOOTHING_WINDOW)
         self.right_history = deque(maxlen=SMOOTHING_WINDOW)
@@ -144,6 +157,12 @@ class CmdBridgeNode(Node):
 
         self.scan_sub = self.create_subscription(
             LaserScan, "/scan", self.scan_callback, 10
+        )
+        self.create_subscription(
+            LaserScan, "/camera_scan", self.camera_scan_callback, 10
+        )
+        self.create_subscription(
+            Twist, "/cmd_vel_server", self.server_cmd_callback, 10
         )
         self.create_subscription(
             PoseWithCovarianceStamped, "/amcl_pose", self._amcl_pose_callback, 10
@@ -339,6 +358,43 @@ class CmdBridgeNode(Node):
         if right_dists:
             self.right_history.append(sum(right_dists) / len(right_dists))
 
+    def camera_scan_callback(self, msg: LaserScan):
+        """Track low obstacles detected by the robot-local camera guard."""
+
+        front_range_rad = math.radians(FRONT_ANGLE_RANGE_DEG)
+        distances = []
+        for index, raw_distance in enumerate(msg.ranges):
+            distance = float(raw_distance)
+            angle = msg.angle_min + index * msg.angle_increment
+            if (
+                -front_range_rad <= angle <= front_range_rad
+                and math.isfinite(distance)
+                and distance >= max(0.0, float(msg.range_min))
+            ):
+                distances.append(distance)
+        self.camera_front_min_dist = min(distances, default=float("inf"))
+        self._last_camera_scan_at = time.monotonic()
+
+    def server_cmd_callback(self, msg: Twist):
+        """Accept a short-lived velocity lease from the compute server."""
+
+        linear = float(msg.linear.x)
+        angular = float(msg.angular.z)
+        if not math.isfinite(linear) or not math.isfinite(angular):
+            self.get_logger().error("서버 속도 명령에 NaN/Inf가 있어 폐기함")
+            return
+        with self.lock:
+            if not self.navigation_mode:
+                return
+            self.server_linear = max(
+                -SERVER_MAX_LINEAR_SPEED, min(SERVER_MAX_LINEAR_SPEED, linear)
+            )
+            self.server_angular = max(
+                -SERVER_MAX_ANGULAR_SPEED,
+                min(SERVER_MAX_ANGULAR_SPEED, angular),
+            )
+            self.last_server_cmd_at = time.monotonic()
+
     def _get_smoothed_left(self):
         return (
             sum(self.left_history) / len(self.left_history)
@@ -411,8 +467,7 @@ class CmdBridgeNode(Node):
         with self.lock:
             navigation_mode = self.navigation_mode
         if navigation_mode:
-            # Nav2 owns /cmd_vel until the mapping/navigation controller
-            # explicitly releases the lock.
+            self._server_navigation_control_loop(twist)
             return
         notebook_connected = self._is_notebook_connected()
 
@@ -525,6 +580,35 @@ class CmdBridgeNode(Node):
 
         self.pub.publish(twist)
 
+    def _server_navigation_control_loop(self, twist):
+        """Apply the robot-local safety envelope to server Nav2 commands."""
+
+        now = time.monotonic()
+        with self.lock:
+            command_age = now - self.last_server_cmd_at
+            linear = self.server_linear
+            angular = self.server_angular
+        scan_age = now - self._last_scan_at
+        if command_age > SERVER_COMMAND_TIMEOUT or scan_age > LIDAR_STALE_SEC:
+            self.pub.publish(twist)
+            return
+
+        camera_distance = float("inf")
+        if now - self._last_camera_scan_at <= CAMERA_STALE_SEC:
+            camera_distance = self.camera_front_min_dist
+        if camera_distance < CAMERA_CRITICAL_DISTANCE_M:
+            self.pub.publish(twist)
+            return
+
+        nearest_front = min(self.front_min_dist, camera_distance)
+        if linear > 0.0 and nearest_front < max(
+            OBSTACLE_STOP_DISTANCE_M, CAMERA_STOP_DISTANCE_M
+        ):
+            linear = 0.0
+        twist.linear.x = linear
+        twist.angular.z = angular
+        self.pub.publish(twist)
+
     def _set_navigation_mode(self, request, response):
         enabled = bool(request.data)
         self._set_navigation_control(enabled)
@@ -544,6 +628,9 @@ class CmdBridgeNode(Node):
             self.desired_angular = 0.0
             self.last_cmd_time = 0.0
             self._timeout_stop_published = True
+            self.server_linear = 0.0
+            self.server_angular = 0.0
+            self.last_server_cmd_at = 0.0
         self.avoid_state = "NORMAL"
         stop = Twist()
         for _ in range(5):
@@ -718,6 +805,27 @@ class CmdBridgeNode(Node):
             payload["texture_format"] = "png"
         except OSError:
             pass
+        try:
+            if os.path.getmtime(MAP_OBSTACLE_TEXTURE_PATH) < os.path.getmtime(
+                image_path
+            ):
+                raise OSError("camera obstacle texture is older than occupancy map")
+            with open(MAP_OBSTACLE_TEXTURE_PATH, "rb") as obstacle_file:
+                obstacle_data = obstacle_file.read()
+            payload["obstacle_texture_base64"] = base64.b64encode(
+                obstacle_data
+            ).decode("ascii")
+        except OSError:
+            pass
+        try:
+            if os.path.getmtime(MAP_MATERIALS_PATH) < os.path.getmtime(image_path):
+                raise OSError("camera material metadata is older than occupancy map")
+            with open(MAP_MATERIALS_PATH, "r", encoding="utf-8") as materials_file:
+                materials = json.load(materials_file)
+            if isinstance(materials, dict):
+                payload["obstacle_materials"] = materials
+        except (OSError, json.JSONDecodeError):
+            pass
         return payload
 
     def _fill_with_desired(self, twist: Twist):
@@ -728,8 +836,12 @@ class CmdBridgeNode(Node):
     def emergency_stop(self):
         self.cancel_navigation("긴급 정지")
         with self.lock:
+            self.navigation_mode = False
             self.desired_linear = 0.0
             self.desired_angular = 0.0
+            self.server_linear = 0.0
+            self.server_angular = 0.0
+            self.last_server_cmd_at = 0.0
             self.last_cmd_time = 0.0
             self._timeout_stop_published = True
         self.avoid_state = "NORMAL"

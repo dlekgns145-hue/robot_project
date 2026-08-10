@@ -140,19 +140,45 @@ class NavigationRecoveryTests(unittest.TestCase):
     def test_mapping_runtime_uses_isolated_tf_and_fixed_sensors(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
         launch_text = (docker_dir / "mapping_runtime_launch.py").read_text()
+        dockerfile_text = (docker_dir / "Dockerfile").read_text()
+        entrypoint_text = (docker_dir / "entrypoint.sh").read_text()
+        compose_text = (docker_dir / "compose.yaml").read_text()
         params_text = (docker_dir / "mapping_slam_params.yaml").read_text()
         nav_params_text = (
             docker_dir / "recovered" / "dwb_nav_params_fixed.yaml"
         ).read_text()
 
         self.assertIn('SetRemap(src="/tf", dst="/tf_nav")', launch_text)
+        self.assertIn(
+            'SetRemap(src="/cmd_vel", dst="/cmd_vel_server")', launch_text
+        )
         self.assertIn('("/tf", "/tf_nav")', launch_text)
         self.assertIn("scan_time_fix.py", launch_text)
         self.assertIn("odom_relay.py", launch_text)
         self.assertIn("navigation_launch.py", launch_text)
         self.assertIn("autonomous_mapping.py", launch_text)
         self.assertIn("map_texture_recorder.py", launch_text)
+        self.assertIn("map_texture_core.py", dockerfile_text)
+        self.assertIn("calibrate_map_texture.py", dockerfile_text)
+        self.assertIn('LaunchConfiguration("texture_far_m")', launch_text)
+        self.assertIn("projection_far_width_m:=", launch_text)
+        odom_command = launch_text.split('f"{runtime_dir}/odom_relay.py"', 1)[1]
+        odom_command, texture_command = odom_command.split(
+            'f"{runtime_dir}/map_texture_recorder.py"', 1
+        )
+        self.assertNotIn("projection_near_m:=", odom_command)
+        self.assertIn("projection_near_m:=", texture_command)
+        self.assertIn("ROBOT_TEXTURE_FAR_M", entrypoint_text)
+        self.assertIn("ROBOT_MAPPING_MAXIMUM_RUNTIME", entrypoint_text)
+        self.assertIn("maximum_exploration_radius:=", launch_text)
+        self.assertIn("ROBOT_MAPPING_MAXIMUM_RADIUS", compose_text)
+        self.assertIn("ROBOT_TEXTURE_SOURCE_TOP_FRACTION", compose_text)
+        camera_guard_command = launch_text.split(
+            'f"{runtime_dir}/camera_obstacle_guard.py"', 1
+        )[1].split('f"{runtime_dir}/odom_relay.py"', 1)[0]
+        self.assertNotIn("source_top_fraction:=", camera_guard_command)
         self.assertIn("camera_obstacle_guard.py", launch_text)
+        self.assertIn("IfCondition(camera_guard_enabled)", launch_text)
         self.assertIn("output_topic:=/scan_slam", launch_text)
         self.assertIn("temporal_window:=3", launch_text)
         self.assertIn("RewrittenYaml", launch_text)
@@ -163,6 +189,7 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("base_frame: base_footprint", params_text)
         self.assertIn("observation_sources: scan camera", nav_params_text)
         self.assertIn("topic: /camera_scan", nav_params_text)
+        self.assertIn("default_server_timeout: 1000", nav_params_text)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"

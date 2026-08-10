@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from config import env_float, env_int
+from map_payload import load_configured_map_payload
 from operations_store import OperationsStore
 from robot_locator import Resolution, RobotLocator
 
@@ -313,13 +314,20 @@ class RobotRelay:
     def status(self, sent: bool) -> dict[str, Any]:
         with self.lock:
             resolution = self.resolution
+            connected = bool(sent and self.connection is not None)
+            last_robot_ip = None if resolution is None else resolution.ip
+            last_method = None if resolution is None else resolution.method
             status = {
                 "type": "status",
                 "gateway_connected": True,
-                "robot_connected": bool(sent and self.connection is not None),
-                "robot_ip": None if resolution is None else resolution.ip,
+                "robot_connected": connected,
+                # Do not present a stale neighbor-table result as the robot's
+                # current DHCP address after its TCP bridge is unreachable.
+                "robot_ip": last_robot_ip if connected else None,
+                "last_robot_ip": last_robot_ip,
                 "robot_mac": self.locator.robot_mac or None,
-                "discovery_method": None if resolution is None else resolution.method,
+                "discovery_method": last_method if connected else None,
+                "last_discovery_method": last_method,
                 "robot_error": self.last_error or None,
                 "lidar_ok": None,
                 "front_distance": None,
@@ -381,8 +389,20 @@ def serve_gui(
                     if robot_ip_hint:
                         relay.set_ip_hint(str(robot_ip_hint))
                     command = legacy_payload(payload)
-                    sent = relay.send(command)
-                    response = relay.status(sent)
+                    if payload.get("type") == "map_request":
+                        # Server-compute maps live beside the gateway. Keep a
+                        # robot fallback so older all-in-one deployments still
+                        # work without configuration changes.
+                        try:
+                            sent = relay.send({"heartbeat": 1})
+                            response = relay.status(sent)
+                            response["map"] = load_configured_map_payload()
+                        except (OSError, ValueError, json.JSONDecodeError):
+                            sent = relay.send(command)
+                            response = relay.status(sent)
+                    else:
+                        sent = relay.send(command)
+                        response = relay.status(sent)
                     if operations is not None and "admin_revision" in payload:
                         try:
                             client_revision = int(payload["admin_revision"])

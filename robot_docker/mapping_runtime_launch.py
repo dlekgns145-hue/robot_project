@@ -13,6 +13,7 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
@@ -27,6 +28,17 @@ def generate_launch_description():
     nav_params_path = LaunchConfiguration("nav_params_file")
     exploration_enabled = LaunchConfiguration("exploration_enabled")
     map_output = LaunchConfiguration("map_output")
+    camera_url = LaunchConfiguration("camera_url")
+    camera_guard_enabled = LaunchConfiguration("camera_guard_enabled")
+    texture_source_top_fraction = LaunchConfiguration(
+        "texture_source_top_fraction"
+    )
+    texture_near_m = LaunchConfiguration("texture_near_m")
+    texture_far_m = LaunchConfiguration("texture_far_m")
+    texture_near_width_m = LaunchConfiguration("texture_near_width_m")
+    texture_far_width_m = LaunchConfiguration("texture_far_width_m")
+    mapping_maximum_runtime = LaunchConfiguration("mapping_maximum_runtime")
+    mapping_maximum_radius = LaunchConfiguration("mapping_maximum_radius")
     # Frontier exploration cares about reaching the free cell, not finishing
     # at an exact heading.  Keep normal saved-map navigation at its stricter
     # yaw tolerance and relax it only inside the mapping runtime.
@@ -53,9 +65,35 @@ def generate_launch_description():
                 "map_output",
                 default_value="/opt/robot-control/maps/orchard_map",
             ),
+            DeclareLaunchArgument(
+                "camera_url",
+                default_value="http://127.0.0.1:8080/stream.mjpg",
+            ),
+            DeclareLaunchArgument("camera_guard_enabled", default_value="true"),
+            DeclareLaunchArgument(
+                "texture_source_top_fraction", default_value="0.50"
+            ),
+            DeclareLaunchArgument("texture_near_m", default_value="0.18"),
+            DeclareLaunchArgument("texture_far_m", default_value="2.0"),
+            DeclareLaunchArgument(
+                "texture_near_width_m", default_value="0.85"
+            ),
+            DeclareLaunchArgument(
+                "texture_far_width_m", default_value="1.8"
+            ),
+            DeclareLaunchArgument(
+                "mapping_maximum_runtime", default_value="900.0"
+            ),
+            DeclareLaunchArgument(
+                "mapping_maximum_radius", default_value="8.0"
+            ),
             GroupAction(
                 [
                     SetRemap(src="/tf", dst="/tf_nav"),
+                    # Nav2 may run on the robot or an external compute server.
+                    # In both cases its command is only a short-lived proposal;
+                    # robot_cmd_bridge performs the final local safety check.
+                    SetRemap(src="/cmd_vel", dst="/cmd_vel_server"),
                     ExecuteProcess(
                         cmd=[
                             "python3",
@@ -96,8 +134,12 @@ def generate_launch_description():
                         cmd=[
                             "python3",
                             f"{runtime_dir}/camera_obstacle_guard.py",
+                            "--ros-args",
+                            "-p",
+                            ["camera_url:=", camera_url],
                         ],
                         output="screen",
+                        condition=IfCondition(camera_guard_enabled),
                     ),
                     ExecuteProcess(
                         cmd=[
@@ -175,6 +217,13 @@ def generate_launch_description():
                             ["start_enabled:=", exploration_enabled],
                             "-p",
                             ["map_output:=", map_output],
+                            "-p",
+                            ["maximum_runtime:=", mapping_maximum_runtime],
+                            "-p",
+                            [
+                                "maximum_exploration_radius:=",
+                                mapping_maximum_radius,
+                            ],
                         ],
                         output="screen",
                     ),
@@ -185,6 +234,27 @@ def generate_launch_description():
                             "--ros-args",
                             "-r",
                             "/tf:=/tf_nav",
+                            "-p",
+                            ["camera_url:=", camera_url],
+                            "-p",
+                            ["projection_near_m:=", texture_near_m],
+                            "-p",
+                            ["projection_far_m:=", texture_far_m],
+                            "-p",
+                            [
+                                "projection_near_width_m:=",
+                                texture_near_width_m,
+                            ],
+                            "-p",
+                            [
+                                "projection_far_width_m:=",
+                                texture_far_width_m,
+                            ],
+                            "-p",
+                            [
+                                "projection_source_top_fraction:=",
+                                texture_source_top_fraction,
+                            ],
                         ],
                         output="screen",
                     ),

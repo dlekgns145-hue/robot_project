@@ -10,6 +10,8 @@ x-ros-service: &ros-service
   init: true
   environment:
     ROS_DOMAIN_ID: "20"
+    # DDS stays host-local; Zenoh is the only cross-host ROS transport.
+    ROS_LOCALHOST_ONLY: "1"
   logging:
     driver: json-file
     options:
@@ -29,6 +31,7 @@ services:
     privileged: true
     environment:
       ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
     devices:
       - "${ROBOT_SERIAL_DEVICE:-/dev/ttyUSB0}:/dev/robot-controller"
     volumes:
@@ -40,6 +43,23 @@ services:
       - -b
       - "${ROBOT_SERIAL_BAUD:-921600}"
       - -v4
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # TCP ROS transport for UTM Shared/NAT deployments. The server bridge
+  # connects to this listener at tcp/<robot-ip>:7447.
+  ros-transport:
+    image: ${ZENOH_BRIDGE_IMAGE:-eclipse/zenoh-bridge-ros2dds:latest}
+    container_name: robot-ros-transport
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    environment:
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
     logging:
       driver: json-file
       options:
@@ -69,6 +89,12 @@ services:
       - agent
     volumes:
       - ./maps:/opt/robot-control/maps
+    environment:
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
+      SERVER_COMMAND_TIMEOUT_SEC: "0.5"
+      SERVER_MAX_LINEAR_SPEED: "0.12"
+      SERVER_MAX_ANGULAR_SPEED: "0.18"
 
   camera:
     <<: *ros-service
@@ -78,6 +104,15 @@ services:
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
+
+  # Low obstacles and network command expiry must be handled on the robot,
+  # even when SLAM/Nav2 run on an external compute server.
+  camera-safety:
+    <<: *ros-service
+    container_name: robot-camera-safety
+    command: ["camera-safety"]
+    depends_on:
+      - camera
 
   # Explicit profile: never starts autonomous mapping during a normal boot.
   # The explorer itself also waits for /autonomous_mapping/start.
@@ -92,6 +127,18 @@ services:
     command: ["mapping"]
     restart: "no"
     profiles: [mapping]
+    environment:
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
+      ROBOT_MAP_OUTPUT: "${ROBOT_MAP_OUTPUT:-/opt/robot-control/maps/orchard_map}"
+      ROBOT_CAMERA_URL: "${ROBOT_CAMERA_URL:-http://127.0.0.1:8080/stream.mjpg}"
+      ROBOT_TEXTURE_SOURCE_TOP_FRACTION: "${ROBOT_TEXTURE_SOURCE_TOP_FRACTION:-0.50}"
+      ROBOT_TEXTURE_NEAR_M: "${ROBOT_TEXTURE_NEAR_M:-0.18}"
+      ROBOT_TEXTURE_FAR_M: "${ROBOT_TEXTURE_FAR_M:-2.0}"
+      ROBOT_TEXTURE_NEAR_WIDTH_M: "${ROBOT_TEXTURE_NEAR_WIDTH_M:-0.85}"
+      ROBOT_TEXTURE_FAR_WIDTH_M: "${ROBOT_TEXTURE_FAR_WIDTH_M:-1.8}"
+      ROBOT_MAPPING_MAXIMUM_RUNTIME: "${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}"
+      ROBOT_MAPPING_MAXIMUM_RADIUS: "${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}"
     depends_on:
       - agent
       - base

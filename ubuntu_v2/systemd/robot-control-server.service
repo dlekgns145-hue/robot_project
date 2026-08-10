@@ -1,0 +1,18 @@
+[Unit]
+Description=Robot Control compute and mapping server
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/robot-control-server/ubuntu_v2
+ExecStart=/usr/bin/docker compose --profile compute up -d gateway ros-transport compute-mapping
+ExecStop=/usr/bin/docker compose --profile compute stop compute-mapping ros-transport gateway
+TimeoutStartSec=0
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
+

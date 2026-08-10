@@ -103,9 +103,49 @@ docker compose --profile mapping up -d mapping-runtime
 ```
 
 GUI에서 `자동 매핑 시작` 후 필요할 때 `현재 지도 저장`을 누른다. 저장이 완료되면
-`orchard_map.pgm/.yaml`과 함께 `orchard_map_texture.png`가 생성된다. texture는 카메라
-영상을 지면으로 투영한 안내용 레이어이며, 장애물 판정과 목표 좌표는 항상 LiDAR PGM을
-사용한다. 카메라를 읽지 못해도 LiDAR 지도 저장은 정상 동작한다.
+`orchard_map.pgm/.yaml`과 함께 아래 시각 레이어가 생성된다.
+
+- `orchard_map_texture.png`: 주행 가능 영역에 투영한 실제 카메라 색상
+- `orchard_map_obstacles.png`: 카메라가 확인한 LiDAR 장애물의 실제 색상(BGRA)
+- `orchard_map_materials.json`: 장애물 색상 기반의 넓은 소재 범주와 비율
+
+GUI는 장애물 레이어 위에도 LiDAR 외곽선을 유지하며, 장애물 판정과 목표 좌표는 항상
+원본 LiDAR PGM을 사용한다. 소재는 `식생`, `흙·목재 계열`, `석재·콘크리트 계열`,
+`반사·합성 소재` 정도의 시각적 추정이며 조명이나 그림자에 따라 달라질 수 있다.
+카메라를 읽지 못해도 LiDAR 지도 저장은 정상 동작한다.
+GUI의 지도 아래 `카메라 레이어` 체크박스로 원본 LiDAR 지도와 합성 결과를 비교할 수
+있고, `불투명도` 슬라이더로 카메라 영상의 강도를 조절할 수 있다. 이 설정은 표시만
+바꾸며 목표 위치의 주행 가능 여부에는 영향을 주지 않는다.
+
+### 카메라 레이어 현장 보정
+
+로봇을 지도에서 위치를 확인하기 쉬운 직선 통로에 정지시키고, 그때의 `map` 기준
+X/Y/Yaw를 기록한다. 매핑 컨테이너에서 아래 도구를 실행하면 실시간 카메라 한 프레임을
+같은 투영 코드로 합성한 미리보기가 `maps/`에 생성된다.
+
+```bash
+docker exec robot-mapping-runtime python3 \
+  /opt/robot-control/navigation/calibrate_map_texture.py \
+  --map /opt/robot-control/maps/orchard_map.yaml \
+  --image http://127.0.0.1:8080/stream.mjpg \
+  --x 1.20 --y -0.35 --yaw-deg 90 \
+  --near 0.18 --far 2.0 \
+  --near-width 0.85 --far-width 1.8 \
+  --source-top 0.50 \
+  --output /opt/robot-control/maps/map_texture_calibration.png
+```
+
+미리보기에서 가까운 바닥이 너무 멀리 시작하면 `--near`를 줄이고, 영상 끝이 실제보다
+멀리 뻗으면 `--far`를 줄인다. 좌우 폭은 각각 `--near-width`, `--far-width`로 맞추며,
+수평선이나 로봇 본체가 섞이면 `--source-top`을 키운다. 결과가 맞으면 도구가 출력한
+`ROBOT_TEXTURE_*` 값을 `robot_docker/.env`에 복사하고 매핑 컨테이너를 다시 만든다.
+
+```bash
+docker compose --profile mapping up -d --build --force-recreate mapping-runtime
+```
+
+보정값은 매핑 런타임의 카메라 합성에만 적용된다. 기존 PGM과 Navigation 장애물 판정은
+변경하지 않는다.
 
 매핑을 마친 뒤에는 다음처럼 Navigation 모드로 되돌린다.
 

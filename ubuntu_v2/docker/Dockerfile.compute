@@ -1,0 +1,48 @@
+ARG BASE_IMAGE=ros:humble-ros-base-jammy
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3-opencv \
+        python3-numpy \
+        ros-humble-navigation2 \
+        ros-humble-nav2-bringup \
+        ros-humble-slam-toolbox \
+    && apt-get clean
+
+WORKDIR /opt/robot-control
+COPY robot_docker/entrypoint.sh /opt/robot-control/entrypoint.sh
+COPY robot_docker/camera_stream_server.py /opt/robot-control/camera_stream_server.py
+COPY robot_docker/robot_cmd_bridge.py /opt/robot-control/robot_cmd_bridge.py
+COPY robot_docker/navigation_runtime_launch.py \
+     robot_docker/mapping_runtime_launch.py \
+     robot_docker/navigation_probe.py \
+     robot_docker/navigation_run_test.py \
+     robot_docker/publish_initial_pose.py \
+     robot_docker/prepare_navigation_params.py \
+     robot_docker/scan_diagnostics.py \
+     robot_docker/odom_relay.py \
+     robot_docker/scan_time_fix.py \
+     robot_docker/autonomous_mapping.py \
+     robot_docker/frontier_core.py \
+     robot_docker/map_texture_core.py \
+     robot_docker/map_texture_recorder.py \
+     robot_docker/calibrate_map_texture.py \
+     robot_docker/camera_obstacle_guard.py \
+     /opt/robot-control/navigation/
+COPY robot_docker/recovered/Broom.yaml \
+     robot_docker/recovered/Broom.pgm \
+     robot_docker/recovered/dwb_nav_params_fixed.yaml \
+     robot_docker/mapping_slam_params.yaml \
+     /opt/robot-control/navigation/
+
+RUN chmod 0755 /opt/robot-control/entrypoint.sh \
+    /opt/robot-control/navigation/*.py \
+    && mkdir -p /opt/robot-control/maps
+
+ENTRYPOINT ["/opt/robot-control/entrypoint.sh"]
+CMD ["mapping-server"]

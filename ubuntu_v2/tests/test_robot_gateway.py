@@ -15,6 +15,7 @@ sys.path.insert(0, str(APP_DIR))
 import robot_gateway  # noqa: E402
 from robot_gateway import RobotRelay, legacy_payload  # noqa: E402
 from robot_locator import (  # noqa: E402
+    Resolution,
     RobotLocator,
     normalize_mac,
     parse_arp_scan,
@@ -151,6 +152,18 @@ class GatewayProtocolTests(unittest.TestCase):
         relay._send_idle_heartbeat()
 
         self.assertEqual(connection.payloads, [b'{"heartbeat":1}\n'])
+
+    def test_disconnected_status_does_not_report_stale_ip_as_current(self) -> None:
+        relay = RobotRelay(RobotLocator(robot_mac="dc:a6:32:01:02:03"))
+        relay.resolution = Resolution("172.30.1.18", "mac-neighbor")
+        relay.connection = None
+
+        status = relay.status(sent=False)
+
+        self.assertIsNone(status["robot_ip"])
+        self.assertIsNone(status["discovery_method"])
+        self.assertEqual(status["last_robot_ip"], "172.30.1.18")
+        self.assertEqual(status["last_discovery_method"], "mac-neighbor")
 
 
 if __name__ == "__main__":

@@ -87,10 +87,13 @@ class NavigationMapView(QLabel):
         self.setStyleSheet("background:#eef3f7; border-radius:12px; color:#65788b;")
         self._image: QImage | None = None
         self._texture: QImage | None = None
+        self._obstacle_texture: QImage | None = None
         self._obstacle_overlay: QImage | None = None
         self._map_info: MapMetadata | None = None
         self._goal: tuple[float, float] | None = None
         self._robot_pose: tuple[float, float, float] | None = None
+        self._texture_visible = True
+        self._texture_opacity = 0.82
 
     @property
     def has_map(self) -> bool:
@@ -98,7 +101,27 @@ class NavigationMapView(QLabel):
 
     @property
     def has_texture(self) -> bool:
-        return self._texture is not None
+        return self._texture is not None or self._obstacle_texture is not None
+
+    @property
+    def has_obstacle_texture(self) -> bool:
+        return self._obstacle_texture is not None
+
+    @property
+    def texture_visible(self) -> bool:
+        return self.has_texture and self._texture_visible
+
+    @property
+    def texture_opacity(self) -> float:
+        return self._texture_opacity
+
+    def set_texture_visible(self, visible: bool) -> None:
+        self._texture_visible = bool(visible)
+        self.update()
+
+    def set_texture_opacity(self, opacity: float) -> None:
+        self._texture_opacity = min(1.0, max(0.0, float(opacity)))
+        self.update()
 
     def set_map_payload(self, payload: dict) -> None:
         map_info = MapMetadata.from_payload(payload)
@@ -110,6 +133,7 @@ class NavigationMapView(QLabel):
             raise ValueError("map image and metadata dimensions differ")
         self._image = image.convertToFormat(QImage.Format.Format_Grayscale8)
         self._texture = None
+        self._obstacle_texture = None
         texture_data = payload.get("texture_base64")
         if texture_data:
             texture_raw = base64.b64decode(str(texture_data), validate=True)
@@ -119,13 +143,32 @@ class NavigationMapView(QLabel):
             if texture.size() != self._image.size():
                 raise ValueError("camera overlay and occupancy map dimensions differ")
             self._texture = texture.convertToFormat(QImage.Format.Format_RGB888)
-        self._obstacle_overlay = self._make_obstacle_overlay(self._image)
+        obstacle_texture_data = payload.get("obstacle_texture_base64")
+        if obstacle_texture_data:
+            obstacle_raw = base64.b64decode(
+                str(obstacle_texture_data), validate=True
+            )
+            obstacle_texture = QImage.fromData(obstacle_raw)
+            if obstacle_texture.isNull():
+                raise ValueError("camera obstacle layer could not be decoded")
+            if obstacle_texture.size() != self._image.size():
+                raise ValueError(
+                    "camera obstacle layer and occupancy map dimensions differ"
+                )
+            self._obstacle_texture = obstacle_texture.convertToFormat(
+                QImage.Format.Format_RGBA8888
+            )
+        self._obstacle_overlay = self._make_obstacle_overlay(
+            self._image, textured_obstacles=self._obstacle_texture is not None
+        )
         self._map_info = map_info
         self.setText("")
         self.update()
 
     @staticmethod
-    def _make_obstacle_overlay(occupancy: QImage) -> QImage:
+    def _make_obstacle_overlay(
+        occupancy: QImage, *, textured_obstacles: bool = False
+    ) -> QImage:
         height = occupancy.height()
         width = occupancy.width()
         stride = occupancy.bytesPerLine()
@@ -135,7 +178,19 @@ class NavigationMapView(QLabel):
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
         occupied = gray < 65
         unknown = (gray >= 65) & (gray < 250)
-        rgba[occupied] = (18, 25, 31, 205)
+        occupied_alpha = 82 if textured_obstacles else 205
+        rgba[occupied] = (18, 25, 31, occupied_alpha)
+        if textured_obstacles and height >= 3 and width >= 3:
+            interior = np.zeros_like(occupied)
+            interior[1:-1, 1:-1] = (
+                occupied[1:-1, 1:-1]
+                & occupied[:-2, 1:-1]
+                & occupied[2:, 1:-1]
+                & occupied[1:-1, :-2]
+                & occupied[1:-1, 2:]
+            )
+            boundary = occupied & ~interior
+            rgba[boundary] = (12, 18, 23, 230)
         rgba[unknown] = (105, 115, 125, 58)
         overlay = QImage(
             rgba.data,
@@ -189,9 +244,20 @@ class NavigationMapView(QLabel):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor("#eef3f7"))
         image_rect = self._image_rect()
-        display_image = self._texture if self._texture is not None else self._image
-        painter.drawImage(image_rect, display_image)
-        if self._texture is not None and self._obstacle_overlay is not None:
+        # Occupancy is always the base layer and remains the click-safety
+        # source. The camera mosaic is a separately adjustable visual layer.
+        painter.drawImage(image_rect, self._image)
+        if self.texture_visible and self._texture is not None:
+            painter.save()
+            painter.setOpacity(self._texture_opacity)
+            painter.drawImage(image_rect, self._texture)
+            painter.restore()
+        if self.texture_visible and self._obstacle_texture is not None:
+            painter.save()
+            painter.setOpacity(min(1.0, self._texture_opacity + 0.12))
+            painter.drawImage(image_rect, self._obstacle_texture)
+            painter.restore()
+        if self.texture_visible and self._obstacle_overlay is not None:
             painter.drawImage(image_rect, self._obstacle_overlay)
         painter.setPen(QPen(QColor("#bdcbd7"), 1))
         painter.drawRect(image_rect)

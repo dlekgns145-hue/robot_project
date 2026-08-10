@@ -42,6 +42,8 @@ def generate_launch_description():
                     # Keep Nav2 on a clean dynamic TF channel containing only
                     # the finite relay transform and AMCL's map transform.
                     SetRemap(src="/tf", dst="/tf_nav"),
+                    # Final motor authority remains on the robot safety bridge.
+                    SetRemap(src="/cmd_vel", dst="/cmd_vel_server"),
                     ExecuteProcess(
                         cmd=[
                             "python3",

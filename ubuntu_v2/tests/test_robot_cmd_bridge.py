@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
+import json
+import os
 import sys
+import tempfile
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -113,6 +118,13 @@ class CommandLeaseTests(unittest.TestCase):
         node.navigation_mode = False
         node.avoid_state = "NORMAL"
         node.pub = RecordingPublisher()
+        node.server_linear = 0.0
+        node.server_angular = 0.0
+        node.last_server_cmd_at = 0.0
+        node._last_scan_at = time.monotonic()
+        node.front_min_dist = 10.0
+        node._last_camera_scan_at = 0.0
+        node.camera_front_min_dist = float("inf")
         return node
 
     def test_stale_command_publishes_one_stop_then_releases_topic(self) -> None:
@@ -150,7 +162,44 @@ class CommandLeaseTests(unittest.TestCase):
 
         self.assertEqual(node.desired_linear, 0.0)
         self.assertEqual(node.desired_angular, 0.0)
-        self.assertEqual(node.pub.messages, [])
+        self.assertEqual(len(node.pub.messages), 1)
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+
+    def test_fresh_server_command_passes_through_local_safety_gate(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        command = Twist()
+        command.linear.x = 0.1
+        command.angular.z = -0.1
+
+        node.server_cmd_callback(command)
+        node.control_loop()
+
+        self.assertEqual(len(node.pub.messages), 1)
+        self.assertAlmostEqual(node.pub.messages[0].linear.x, 0.1)
+        self.assertAlmostEqual(node.pub.messages[0].angular.z, -0.1)
+
+    def test_stale_server_command_is_stopped_on_robot(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = 0.1
+        node.last_server_cmd_at = 0.0
+
+        node.control_loop()
+
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+
+    def test_local_camera_obstacle_blocks_server_forward_motion(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = 0.1
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.4
+
+        node.control_loop()
+
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
 
     def test_heartbeat_does_not_become_a_motor_command(self) -> None:
         commands = []
@@ -206,6 +255,47 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertEqual(commands, ["mapping_start"])
         self.assertTrue(response["command_result"]["ok"])
         self.assertTrue(response["mapping"]["enabled"])
+
+    def test_map_payload_includes_fresh_obstacle_material_layers(self) -> None:
+        node = object.__new__(self.bridge.CmdBridgeNode)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "orchard_map.pgm"
+            yaml_path = root / "orchard_map.yaml"
+            texture_path = root / "orchard_map_texture.png"
+            obstacle_path = root / "orchard_map_obstacles.png"
+            materials_path = root / "orchard_map_materials.json"
+            image_path.write_bytes(b"P2\n2 2\n255\n254 0\n205 254\n")
+            yaml_path.write_text(
+                "resolution: 0.05\norigin: [0.0, 0.0, 0.0]\n",
+                encoding="utf-8",
+            )
+            texture_path.write_bytes(b"texture-png")
+            obstacle_path.write_bytes(b"obstacle-png")
+            materials = {
+                "observed_pixels": 10,
+                "counts": {"vegetation": 8, "other": 2},
+                "dominant": "vegetation",
+            }
+            materials_path.write_text(json.dumps(materials), encoding="utf-8")
+            newer = image_path.stat().st_mtime + 1.0
+            for path in (texture_path, obstacle_path, materials_path):
+                os.utime(path, (newer, newer))
+
+            with patch.multiple(
+                self.bridge,
+                MAP_DIRECTORY=str(root),
+                MAP_TEXTURE_PATH=str(texture_path),
+                MAP_OBSTACLE_TEXTURE_PATH=str(obstacle_path),
+                MAP_MATERIALS_PATH=str(materials_path),
+            ):
+                payload = node.load_map_payload()
+
+            self.assertEqual(
+                base64.b64decode(payload["obstacle_texture_base64"]),
+                b"obstacle-png",
+            )
+            self.assertEqual(payload["obstacle_materials"], materials)
 
 
 if __name__ == "__main__":

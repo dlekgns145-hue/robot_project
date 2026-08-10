@@ -39,6 +39,7 @@ services:
     logging: *service-logging
     volumes:
       - ./data:/var/lib/robot-control-v2
+      - ./maps:/opt/robot-control/maps:ro
     environment:
       COMMAND_PORT: ${COMMAND_PORT:-9999}
       COMMAND_TOKEN: ${COMMAND_TOKEN:-change-this-token}
@@ -59,6 +60,7 @@ services:
       ROBOT_ID: ${ROBOT_ID:-robot-1}
       ROBOT_NAME: ${ROBOT_NAME:-Yahboom Robot 1}
       OPERATIONS_DB_PATH: /var/lib/robot-control-v2/operations.sqlite3
+      MAP_DIRECTORY: /opt/robot-control/maps
     healthcheck:
       test:
         - CMD-SHELL
@@ -70,6 +72,56 @@ services:
       timeout: 2s
       retries: 3
       start_period: 5s
+
+  # Heavy SLAM/Nav2/camera-map processing runs on the Ubuntu compute server.
+  # Raw robot topics arrive over ROS 2 DDS; only /cmd_vel_server is returned.
+  compute-mapping:
+    image: ${ROBOT_COMPUTE_IMAGE:-robot-control-compute:humble}
+    build:
+      context: ..
+      dockerfile: ubuntu_v2/docker/Dockerfile.compute
+      args:
+        BASE_IMAGE: ${COMPUTE_BASE_IMAGE:-ros:humble-ros-base-jammy}
+    container_name: robot-v2-compute-mapping
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    init: true
+    profiles: [compute]
+    logging: *service-logging
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
+      ROS_LOCALHOST_ONLY: "1"
+      ROBOT_CAMERA_URL: ${ROBOT_CAMERA_URL:-http://172.30.1.10:8080/stream.mjpg}
+      ROBOT_MAP_OUTPUT: /opt/robot-control/maps/orchard_map
+      ROBOT_MAPPING_MAXIMUM_RUNTIME: ${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}
+      ROBOT_MAPPING_MAXIMUM_RADIUS: ${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}
+      ROBOT_TEXTURE_SOURCE_TOP_FRACTION: ${ROBOT_TEXTURE_SOURCE_TOP_FRACTION:-0.50}
+      ROBOT_TEXTURE_NEAR_M: ${ROBOT_TEXTURE_NEAR_M:-0.18}
+      ROBOT_TEXTURE_FAR_M: ${ROBOT_TEXTURE_FAR_M:-2.0}
+      ROBOT_TEXTURE_NEAR_WIDTH_M: ${ROBOT_TEXTURE_NEAR_WIDTH_M:-0.85}
+      ROBOT_TEXTURE_FAR_WIDTH_M: ${ROBOT_TEXTURE_FAR_WIDTH_M:-1.8}
+    volumes:
+      - ./maps:/opt/robot-control/maps
+    command: ["mapping-server"]
+    depends_on:
+      ros-transport:
+        condition: service_started
+
+  # UTM Shared/NAT cannot carry DDS multicast. Zenoh transports the complete
+  # ROS graph over one outbound TCP connection to the robot.
+  ros-transport:
+    image: ${ZENOH_BRIDGE_IMAGE:-eclipse/zenoh-bridge-ros2dds:latest}
+    container_name: robot-v2-ros-transport
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    profiles: [compute]
+    logging: *service-logging
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
+      ROS_LOCALHOST_ONLY: "1"
+    command: ["-e", "tcp/${ROBOT_IP:-172.30.1.10}:7447"]
 
   # Optional legacy/direct mode for robots whose micro-ROS board connects straight
   # to this VM. It is deliberately not started by the default `compose up`.

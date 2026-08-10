@@ -19,18 +19,60 @@ Windows/macOS GUI
   - 수동/Follow 명령
         │ TCP 9999 (고정 대상: Ubuntu VM)
         ▼
-Ubuntu VM Docker: gateway
+Ubuntu VM Docker: gateway + compute-mapping
   - GUI 토큰 검증
   - 로봇 Wi-Fi MAC → 현재 DHCP IP 탐색
+  - SLAM, Nav2, 프런티어 탐색, 카메라 지도 합성
+  - 완성 지도와 실사/소재 레이어 저장
   - UTM NAT에서는 GUI가 해석한 raspberrypi.local IP를 보조 전달
   - IP 변경/연결 끊김 시 자동 재탐색
         │ TCP 9999 (현재 로봇 IP로 자동 연결)
         ▼
 실물 로봇 Raspberry Pi
-  - 기존 robot_cmd_bridge.py
-  - 기존 micro-ROS Agent/base_node_X3
-  - /cmd_vel, LiDAR, 서보 및 모터
+  - micro-ROS Agent/base_node_X3와 센서 수집
+  - 카메라 저상 장애물 감시
+  - /cmd_vel_server 명령 임대·속도 제한·LiDAR 안전 검사
+  - 최종 /cmd_vel, 서보 및 모터
 ```
+
+센서 데이터는 ROS 2 DDS로 Ubuntu 서버에 전달되고 서버는
+`/cmd_vel_server`만 반환합니다. 이 명령은 최종 모터 명령이 아닙니다.
+로봇의 `robot_cmd_bridge.py`가 0.5초 유효시간, LiDAR 최신성, 카메라 저상
+장애물을 모두 통과시킨 경우에만 실제 `/cmd_vel`로 전달합니다. Wi-Fi나 서버가
+끊기면 로봇이 서버와 독립적으로 정지합니다.
+
+UTM은 `Shared Network`를 사용합니다. DDS 멀티캐스트는 NAT를 통과하지 않으므로
+로봇과 서버의 `zenoh-bridge-ros2dds`가 ROS 토픽·서비스·액션을 TCP 7447 하나로
+전달합니다. DDS는 각 장치의 localhost에만 묶여 브리지 중복 루프를 방지합니다.
+GUI는 Mac의 `127.0.0.1:9999` 포워딩으로 gateway에 접속합니다.
+
+서버 연산 런타임 실행:
+
+```bash
+cd ubuntu_v2
+cp -n .env.example .env
+# .env의 ROBOT_MAC, ROBOT_CAMERA_URL, COMMAND_TOKEN 확인
+./scripts/run_compute_mapping.sh
+```
+
+`compute-mapping`은 시작 직후 센서와 Nav2만 준비하고 로봇을 움직이지 않습니다.
+GUI의 `자동 매핑 시작` 확인을 거쳐야 탐색을 시작합니다. 결과 지도는 서버의
+`ubuntu_v2/maps`에 저장되며 gateway가 GUI로 반환합니다.
+
+### 별도 Ubuntu 컴퓨터용 서버 이미지
+
+UTM 대신 별도 Ubuntu 22.04/24.04/26.04 컴퓨터를 서버로 쓰려면 배포 이미지를
+생성합니다.
+
+```bash
+cd server_image
+./build_server_image.sh
+```
+
+`dist/robot-control-server-*.tar.gz`를 대상 Ubuntu 컴퓨터로 옮긴 다음 압축을
+풀고 `sudo ./INSTALL_SERVER.sh`를 실행합니다. Docker 설치, 서버 이미지 빌드,
+systemd 자동 시작 등록까지 한 번에 처리합니다. GUI가 다른 컴퓨터에서 실행되면
+`127.0.0.1`이 아니라 이 Ubuntu 서버의 LAN IP와 포트 `9999`를 입력합니다.
 
 GUI는 항상 Ubuntu VM에만 연결합니다. GUI 설정에는 로봇 IP를 입력하지
 않습니다. 로봇 IP가 DHCP로 변경되어도 고정된 Wi-Fi MAC 주소로 다시 찾습니다.

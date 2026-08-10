@@ -6,7 +6,7 @@ COPY camera_stream_server.py /opt/robot-control/camera_stream_server.py
 COPY entrypoint.sh /opt/robot-control/entrypoint.sh
 COPY navigation_runtime_launch.py mapping_runtime_launch.py navigation_probe.py navigation_run_test.py \
     publish_initial_pose.py prepare_navigation_params.py scan_diagnostics.py odom_relay.py scan_time_fix.py \
-    autonomous_mapping.py frontier_core.py map_texture_recorder.py camera_obstacle_guard.py \
+    autonomous_mapping.py frontier_core.py map_texture_core.py map_texture_recorder.py calibrate_map_texture.py camera_obstacle_guard.py \
     /opt/robot-control/navigation/
 COPY recovered/Broom.yaml recovered/Broom.pgm recovered/dwb_nav_params_fixed.yaml \
     mapping_slam_params.yaml \

@@ -7,13 +7,10 @@ continue to use the original occupancy PGM.
 
 from __future__ import annotations
 
-import ast
 import json
 import math
-import os
 import threading
 import time
-from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -25,170 +22,13 @@ from rclpy.time import Time
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-
-@dataclass(frozen=True)
-class SavedMapInfo:
-    width: int
-    height: int
-    resolution: float
-    origin_x: float
-    origin_y: float
-    origin_yaw: float
-
-
-@dataclass(frozen=True)
-class CameraSample:
-    jpeg: bytes
-    x: float
-    y: float
-    yaw: float
-
-
-def world_to_map_pixel(x: float, y: float, info: SavedMapInfo) -> tuple[float, float]:
-    dx = x - info.origin_x
-    dy = y - info.origin_y
-    cosine = math.cos(info.origin_yaw)
-    sine = math.sin(info.origin_yaw)
-    local_x = cosine * dx + sine * dy
-    local_y = -sine * dx + cosine * dy
-    return (
-        local_x / info.resolution - 0.5,
-        info.height - local_y / info.resolution - 0.5,
-    )
-
-
-def _world_ground_point(
-    robot_x: float,
-    robot_y: float,
-    robot_yaw: float,
-    forward: float,
-    left: float,
-) -> tuple[float, float]:
-    cosine = math.cos(robot_yaw)
-    sine = math.sin(robot_yaw)
-    return (
-        robot_x + cosine * forward - sine * left,
-        robot_y + sine * forward + cosine * left,
-    )
-
-
-def load_saved_map(map_output: str) -> tuple[np.ndarray, SavedMapInfo]:
-    image = cv2.imread(f"{map_output}.pgm", cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise ValueError(f"saved occupancy image is unavailable: {map_output}.pgm")
-    metadata: dict[str, str] = {}
-    with open(f"{map_output}.yaml", "r", encoding="utf-8") as yaml_file:
-        for raw_line in yaml_file:
-            line = raw_line.split("#", 1)[0].strip()
-            if line and ":" in line:
-                key, value = (part.strip() for part in line.split(":", 1))
-                metadata[key] = value
-    origin = ast.literal_eval(metadata.get("origin", "[0, 0, 0]"))
-    height, width = image.shape
-    return image, SavedMapInfo(
-        width=width,
-        height=height,
-        resolution=float(metadata["resolution"]),
-        origin_x=float(origin[0]),
-        origin_y=float(origin[1]),
-        origin_yaw=float(origin[2]),
-    )
-
-
-def compose_texture(
-    occupancy: np.ndarray,
-    info: SavedMapInfo,
-    samples: list[CameraSample],
-    *,
-    near_m: float = 0.25,
-    far_m: float = 3.5,
-    near_width_m: float = 1.25,
-    far_width_m: float = 2.6,
-    source_top_fraction: float = 0.42,
-) -> np.ndarray:
-    """Blend camera ground trapezoids into occupancy-map pixel coordinates."""
-    canvas_sum = np.zeros((info.height, info.width, 3), dtype=np.float32)
-    canvas_weight = np.zeros((info.height, info.width), dtype=np.float32)
-
-    for sample in samples:
-        encoded = np.frombuffer(sample.jpeg, dtype=np.uint8)
-        frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-        if frame is None or frame.size == 0:
-            continue
-        frame_height, frame_width = frame.shape[:2]
-        source = np.float32(
-            [
-                [frame_width * 0.27, frame_height * source_top_fraction],
-                [frame_width * 0.73, frame_height * source_top_fraction],
-                [frame_width * 0.98, frame_height * 0.98],
-                [frame_width * 0.02, frame_height * 0.98],
-            ]
-        )
-        ground_corners = [
-            (far_m, far_width_m / 2.0),
-            (far_m, -far_width_m / 2.0),
-            (near_m, -near_width_m / 2.0),
-            (near_m, near_width_m / 2.0),
-        ]
-        destination = np.float32(
-            [
-                world_to_map_pixel(
-                    *_world_ground_point(
-                        sample.x, sample.y, sample.yaw, forward, left
-                    ),
-                    info,
-                )
-                for forward, left in ground_corners
-            ]
-        )
-        left = max(0, int(math.floor(float(destination[:, 0].min()))) - 2)
-        top = max(0, int(math.floor(float(destination[:, 1].min()))) - 2)
-        right = min(
-            info.width, int(math.ceil(float(destination[:, 0].max()))) + 3
-        )
-        bottom = min(
-            info.height, int(math.ceil(float(destination[:, 1].max()))) + 3
-        )
-        if right <= left or bottom <= top:
-            continue
-        local_destination = destination - np.float32([left, top])
-        homography = cv2.getPerspectiveTransform(source, local_destination)
-        source_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
-        cv2.fillConvexPoly(source_mask, source.astype(np.int32), 255)
-        warped = cv2.warpPerspective(
-            frame, homography, (right - left, bottom - top), flags=cv2.INTER_LINEAR
-        )
-        weight = cv2.warpPerspective(
-            source_mask,
-            homography,
-            (right - left, bottom - top),
-            flags=cv2.INTER_LINEAR,
-        ).astype(np.float32) / 255.0
-        # Feather boundaries to avoid hard quadrilateral seams.
-        weight = cv2.GaussianBlur(weight, (0, 0), sigmaX=1.2)
-        canvas_sum[top:bottom, left:right] += (
-            warped.astype(np.float32) * weight[..., None]
-        )
-        canvas_weight[top:bottom, left:right] += weight
-
-    base = cv2.cvtColor(occupancy, cv2.COLOR_GRAY2BGR)
-    observed = canvas_weight > 0.08
-    # Unknown/occupied geometry remains visible and authoritative.
-    usable = observed & (occupancy >= 250)
-    if np.any(usable):
-        averaged = canvas_sum / np.maximum(canvas_weight[..., None], 0.001)
-        base[usable] = np.clip(averaged[usable], 0, 255).astype(np.uint8)
-    return base
-
-
-def save_texture_atomic(path: str, image: np.ndarray) -> None:
-    ok, encoded = cv2.imencode(".png", image)
-    if not ok:
-        raise RuntimeError("camera texture PNG encoding failed")
-    temporary = f"{path}.tmp"
-    with open(temporary, "wb") as output_file:
-        output_file.write(encoded.tobytes())
-    os.replace(temporary, path)
+from map_texture_core import (
+    CameraSample,
+    compose_visual_layers,
+    load_saved_map,
+    save_json_atomic,
+    save_texture_atomic,
+)
 
 
 class MapTextureRecorder(Node):
@@ -334,7 +174,7 @@ class MapTextureRecorder(Node):
                 )
                 return
             occupancy, info = load_saved_map(map_output)
-            texture = compose_texture(
+            texture, obstacle_texture, materials = compose_visual_layers(
                 occupancy,
                 info,
                 samples,
@@ -351,9 +191,16 @@ class MapTextureRecorder(Node):
                 ),
             )
             output_path = f"{map_output}_texture.png"
+            obstacle_output_path = f"{map_output}_obstacles.png"
+            materials_output_path = f"{map_output}_materials.json"
             save_texture_atomic(output_path, texture)
+            save_texture_atomic(obstacle_output_path, obstacle_texture)
+            save_json_atomic(materials_output_path, materials)
             self.get_logger().info(
-                f"camera map texture saved from {len(samples)} samples: {output_path}"
+                "camera map layers saved from "
+                f"{len(samples)} samples: {output_path}; "
+                f"obstacle material={materials['dominant']} "
+                f"({materials['dominant_share']:.0%})"
             )
         except Exception as error:
             self.get_logger().error(f"camera map texture generation failed: {error}")

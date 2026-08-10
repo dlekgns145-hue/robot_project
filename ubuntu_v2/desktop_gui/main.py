@@ -11,6 +11,7 @@ from PySide6.QtGui import QCloseEvent, QFont, QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -450,6 +452,34 @@ class MainWindow(QMainWindow):
         self.map_view.goal_selected.connect(self._on_map_goal_selected)
         self.map_view.selection_rejected.connect(self.append_log)
         map_layout.addWidget(self.map_view, 1)
+        layer_controls = QHBoxLayout()
+        self.map_texture_checkbox = QCheckBox("카메라 레이어")
+        self.map_texture_checkbox.setChecked(True)
+        self.map_texture_checkbox.setEnabled(False)
+        self.map_texture_checkbox.toggled.connect(
+            self._set_map_texture_visible
+        )
+        self.map_texture_opacity_label = QLabel("불투명도 82%")
+        self.map_texture_opacity_label.setObjectName("ControlHint")
+        self.map_texture_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.map_texture_opacity_slider.setRange(0, 100)
+        self.map_texture_opacity_slider.setValue(82)
+        self.map_texture_opacity_slider.setEnabled(False)
+        self.map_texture_opacity_slider.setMaximumWidth(180)
+        self.map_texture_opacity_slider.valueChanged.connect(
+            self._set_map_texture_opacity
+        )
+        layer_controls.addStretch(1)
+        layer_controls.addWidget(self.map_texture_checkbox)
+        layer_controls.addWidget(self.map_texture_opacity_label)
+        layer_controls.addWidget(self.map_texture_opacity_slider)
+        layer_controls.addStretch(1)
+        map_layout.addLayout(layer_controls)
+        self.map_material_label = QLabel("")
+        self.map_material_label.setObjectName("ControlHint")
+        self.map_material_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.map_material_label.setVisible(False)
+        map_layout.addWidget(self.map_material_label)
         legend = QLabel(
             "파란색: 로봇 위치 · 주황색: 선택 목표 · 어두운 영역: LiDAR 장애물"
         )
@@ -855,6 +885,17 @@ class MainWindow(QMainWindow):
     def on_map_payload(self, payload: dict) -> None:
         try:
             self.map_view.set_map_payload(payload)
+            has_texture = self.map_view.has_texture
+            self.map_texture_checkbox.setEnabled(has_texture)
+            self.map_texture_opacity_slider.setEnabled(
+                has_texture and self.map_texture_checkbox.isChecked()
+            )
+            self.map_view.set_texture_visible(
+                has_texture and self.map_texture_checkbox.isChecked()
+            )
+            material_text = self._map_material_summary(payload)
+            self.map_material_label.setText(material_text)
+            self.map_material_label.setVisible(bool(material_text))
             width = int(payload["width"])
             height = int(payload["height"])
             resolution = float(payload["resolution"])
@@ -866,6 +907,51 @@ class MainWindow(QMainWindow):
         except (KeyError, TypeError, ValueError) as error:
             self._map_requested_for_ip = ""
             self.append_log(f"지도 표시 실패: {error}")
+
+    @staticmethod
+    def _map_material_summary(payload: dict) -> str:
+        materials = payload.get("obstacle_materials")
+        if not isinstance(materials, dict):
+            return ""
+        counts = materials.get("counts")
+        if not isinstance(counts, dict):
+            return ""
+        try:
+            observed = int(materials.get("observed_pixels", 0))
+            ranked = sorted(
+                (
+                    (str(name), int(count))
+                    for name, count in counts.items()
+                    if int(count) > 0
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        except (TypeError, ValueError):
+            return ""
+        if observed <= 0 or not ranked:
+            return "카메라 장애물 소재 추정: 관측 데이터 부족"
+        labels = {
+            "vegetation": "식생",
+            "earth_or_wood": "흙·목재 계열",
+            "stone_or_concrete": "석재·콘크리트 계열",
+            "reflective_or_synthetic": "반사·합성 소재",
+            "other": "기타",
+        }
+        details = " · ".join(
+            f"{labels.get(name, name)} {count / observed:.0%}"
+            for name, count in ranked[:3]
+        )
+        return f"카메라 장애물 소재 추정: {details} (시각 안내용)"
+
+    def _set_map_texture_opacity(self, value: int) -> None:
+        self.map_texture_opacity_label.setText(f"불투명도 {value}%")
+        self.map_view.set_texture_opacity(value / 100.0)
+
+    def _set_map_texture_visible(self, visible: bool) -> None:
+        enabled = bool(visible) and self.map_view.has_texture
+        self.map_view.set_texture_visible(enabled)
+        self.map_texture_opacity_slider.setEnabled(enabled)
 
     def refresh_map(self) -> None:
         if self.client is None or not self.robot_connected:
