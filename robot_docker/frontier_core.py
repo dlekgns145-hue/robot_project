@@ -218,6 +218,79 @@ def _staged_path_cell(
     return path[min(maximum_steps, len(path) - 1)]
 
 
+def _path_step_count(target: int, parents: dict[int, int | None]) -> int:
+    """Return shortest known-free path length in grid steps."""
+
+    if target not in parents:
+        return 0
+    steps = 0
+    current = target
+    while parents[current] is not None:
+        current = parents[current]
+        steps += 1
+    return steps
+
+
+def _path_standoff_cell(
+    target: int,
+    parents: dict[int, int | None],
+    *,
+    resolution: float,
+    standoff_distance: float,
+) -> int:
+    """Move a frontier goal inward along its reachable free-space path."""
+
+    if standoff_distance <= 0.0 or target not in parents:
+        return target
+    steps = max(1, math.ceil(standoff_distance / resolution))
+    current = target
+    for _ in range(steps):
+        parent = parents.get(current)
+        if parent is None:
+            break
+        current = parent
+    return current
+
+
+def cell_has_obstacle_clearance(
+    data: Sequence[int],
+    spec: GridSpec,
+    index: int,
+    *,
+    clearance_m: float,
+    free_max: int = 20,
+) -> bool:
+    """Whether a goal cell is clear of occupied map cells by a safe radius.
+
+    Unknown cells are intentionally handled by frontier standoff instead of
+    this function. Treating every unknown cell as an obstacle here would leave
+    no valid goal during the first seconds of exploration.
+    """
+
+    if clearance_m <= 0.0:
+        return True
+    center_x = index % spec.width
+    center_y = index // spec.width
+    cell_radius = math.ceil(clearance_m / spec.resolution)
+    clearance_squared = clearance_m * clearance_m
+    for offset_y in range(-cell_radius, cell_radius + 1):
+        for offset_x in range(-cell_radius, cell_radius + 1):
+            if (
+                (offset_x * spec.resolution) ** 2
+                + (offset_y * spec.resolution) ** 2
+                > clearance_squared
+            ):
+                continue
+            grid_x = center_x + offset_x
+            grid_y = center_y + offset_y
+            if not (0 <= grid_x < spec.width and 0 <= grid_y < spec.height):
+                continue
+            value = data[grid_y * spec.width + grid_x]
+            if value > free_max:
+                return False
+    return True
+
+
 def frontier_candidates(
     data: Sequence[int],
     spec: GridSpec,
@@ -233,6 +306,7 @@ def frontier_candidates(
     distance_weight: float = 0.45,
     goal_standoff: float = 0.0,
     maximum_goal_step_distance: float = 0.0,
+    minimum_obstacle_clearance: float = 0.0,
 ) -> list[FrontierCandidate]:
     """Return scored, reachable frontier approach goals, best first.
 
@@ -260,63 +334,23 @@ def frontier_candidates(
         for index in cluster:
             if index not in reachable:
                 continue
-            frontier_grid_x = index % spec.width
-            frontier_grid_y = index // spec.width
-            frontier_x, frontier_y = grid_cell_to_world(
-                frontier_grid_x, frontier_grid_y, spec
+            approach_index = _path_standoff_cell(
+                index,
+                parents,
+                resolution=spec.resolution,
+                standoff_distance=goal_standoff,
             )
-            approach_index = index
-            if goal_standoff > 0.0:
-                frontier_distance = math.hypot(
-                    frontier_x - robot_x, frontier_y - robot_y
-                )
-                if frontier_distance > 1e-9:
-                    ratio = min(goal_standoff, frontier_distance) / frontier_distance
-                    desired_x = frontier_x - (frontier_x - robot_x) * ratio
-                    desired_y = frontier_y - (frontier_y - robot_y) * ratio
-                    desired_grid_x, desired_grid_y = world_to_grid_cell(
-                        desired_x, desired_y, spec
-                    )
-                    search_radius = max(
-                        1, math.ceil(goal_standoff / spec.resolution) + 1
-                    )
-                    nearby = []
-                    for offset_y in range(-search_radius, search_radius + 1):
-                        for offset_x in range(-search_radius, search_radius + 1):
-                            candidate_x = desired_grid_x + offset_x
-                            candidate_y = desired_grid_y + offset_y
-                            if not (
-                                0 <= candidate_x < spec.width
-                                and 0 <= candidate_y < spec.height
-                            ):
-                                continue
-                            candidate_index = candidate_y * spec.width + candidate_x
-                            if candidate_index not in reachable:
-                                continue
-                            # Prefer a stable interior cell. Fall back to the
-                            # frontier itself only when the known corridor is
-                            # too narrow to provide one.
-                            if candidate_index in frontiers:
-                                continue
-                            candidate_world = grid_cell_to_world(
-                                candidate_x, candidate_y, spec
-                            )
-                            nearby.append(
-                                (
-                                    (candidate_world[0] - desired_x) ** 2
-                                    + (candidate_world[1] - desired_y) ** 2,
-                                    candidate_index,
-                                )
-                            )
-                    if nearby:
-                        approach_index = min(nearby)[1]
+            if not cell_has_obstacle_clearance(
+                data,
+                spec,
+                approach_index,
+                clearance_m=minimum_obstacle_clearance,
+            ):
+                continue
 
-            target_grid_x = approach_index % spec.width
-            target_grid_y = approach_index // spec.width
-            target_x, target_y = grid_cell_to_world(
-                target_grid_x, target_grid_y, spec
+            target_distance = (
+                _path_step_count(approach_index, parents) * spec.resolution
             )
-            target_distance = math.hypot(target_x - robot_x, target_y - robot_y)
             if target_distance < min_distance or target_distance > max_distance:
                 continue
             staged_index = _staged_path_cell(
@@ -328,7 +362,14 @@ def frontier_candidates(
             grid_x = staged_index % spec.width
             grid_y = staged_index // spec.width
             world_x, world_y = grid_cell_to_world(grid_x, grid_y, spec)
-            distance = math.hypot(world_x - robot_x, world_y - robot_y)
+            distance = _path_step_count(staged_index, parents) * spec.resolution
+            if not cell_has_obstacle_clearance(
+                data,
+                spec,
+                staged_index,
+                clearance_m=minimum_obstacle_clearance,
+            ):
+                continue
             if any(
                 math.hypot(world_x - blocked_x, world_y - blocked_y)
                 <= blacklist_radius

@@ -54,6 +54,12 @@ SERVER_COMMAND_TIMEOUT = float(os.getenv("SERVER_COMMAND_TIMEOUT_SEC", "0.5"))
 SERVER_MAX_LINEAR_SPEED = float(os.getenv("SERVER_MAX_LINEAR_SPEED", "0.12"))
 SERVER_MAX_ANGULAR_SPEED = float(os.getenv("SERVER_MAX_ANGULAR_SPEED", "0.18"))
 SERVER_MIN_ANGULAR_SPEED = float(os.getenv("SERVER_MIN_ANGULAR_SPEED", "0.18"))
+SERVER_PURE_ROTATION_LINEAR_EPSILON = float(
+    os.getenv("SERVER_PURE_ROTATION_LINEAR_EPSILON", "0.01")
+)
+SERVER_DRIVING_ANGULAR_DEADBAND = float(
+    os.getenv("SERVER_DRIVING_ANGULAR_DEADBAND", "0.03")
+)
 NAVIGATION_LEASE_TIMEOUT = float(os.getenv("NAVIGATION_LEASE_TIMEOUT_SEC", "2.5"))
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
@@ -93,6 +99,28 @@ ESCAPE_TURN_TIME_SEC = 2.5  # 이 시간 동안 LiDAR 무시하고 무조건 회
 SERVO_TILT_DEFAULT = -80
 SERVO_PAN_MIN = -60
 SERVO_PAN_MAX = 60
+
+
+def shape_server_velocity(linear: float, angular: float) -> tuple[float, float]:
+    """Clamp Nav2 velocity without turning smooth curves into hard spins.
+
+    The base needs roughly ``SERVER_MIN_ANGULAR_SPEED`` to start an in-place
+    rotation.  Applying that minimum while the robot is also moving, however,
+    converts every small DWB steering correction into the maximum turn rate.
+    Keep the startup boost for pure rotation only and remove tiny steering
+    noise while driving.
+    """
+
+    linear = max(-SERVER_MAX_LINEAR_SPEED, min(SERVER_MAX_LINEAR_SPEED, linear))
+    angular = max(
+        -SERVER_MAX_ANGULAR_SPEED, min(SERVER_MAX_ANGULAR_SPEED, angular)
+    )
+    if abs(linear) <= SERVER_PURE_ROTATION_LINEAR_EPSILON:
+        if 0.0 < abs(angular) < SERVER_MIN_ANGULAR_SPEED:
+            angular = math.copysign(SERVER_MIN_ANGULAR_SPEED, angular)
+    elif abs(angular) < SERVER_DRIVING_ANGULAR_DEADBAND:
+        angular = 0.0
+    return linear, angular
 
 
 class CmdBridgeNode(Node):
@@ -396,18 +424,12 @@ class CmdBridgeNode(Node):
         if not math.isfinite(linear) or not math.isfinite(angular):
             self.get_logger().error("서버 속도 명령에 NaN/Inf가 있어 폐기함")
             return
-        if 0.0 < abs(angular) < SERVER_MIN_ANGULAR_SPEED:
-            angular = math.copysign(SERVER_MIN_ANGULAR_SPEED, angular)
+        linear, angular = shape_server_velocity(linear, angular)
         with self.lock:
             if not self.navigation_mode:
                 return
-            self.server_linear = max(
-                -SERVER_MAX_LINEAR_SPEED, min(SERVER_MAX_LINEAR_SPEED, linear)
-            )
-            self.server_angular = max(
-                -SERVER_MAX_ANGULAR_SPEED,
-                min(SERVER_MAX_ANGULAR_SPEED, angular),
-            )
+            self.server_linear = linear
+            self.server_angular = angular
             self.last_server_cmd_at = time.monotonic()
 
     def navigation_lease_callback(self, message: Bool):

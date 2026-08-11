@@ -16,13 +16,24 @@ class ServerImageTests(unittest.TestCase):
         self.assertIn("docker compose --profile compute build gateway compute-mapping", installer)
         self.assertIn("systemctl enable robot-control-server.service", installer)
         self.assertIn("systemctl restart robot-control-server.service", installer)
+        self.assertIn('chown root:docker "${ENV_FILE}"', installer)
+        self.assertIn('chmod 0640 "${ENV_FILE}"', installer)
 
     def test_server_service_starts_the_complete_compute_stack(self):
         service = (
             ROOT / "ubuntu_v2" / "systemd" / "robot-control-server.service"
         ).read_text()
-        self.assertIn("--profile compute up -d gateway ros-transport compute-mapping", service)
+        self.assertIn("scripts/run_compute_mapping.sh", service)
         self.assertIn("After=docker.service network-online.target", service)
+
+        runner = (
+            ROOT / "ubuntu_v2" / "scripts" / "run_compute_mapping.sh"
+        ).read_text()
+        self.assertIn(
+            "--profile compute up -d gateway ros-transport compute-mapping", runner
+        )
+        self.assertIn("/navigation_scan_filter", runner)
+        self.assertIn("docker restart robot-v2-ros-transport", runner)
 
     def test_gateway_image_contains_server_map_payload_module(self):
         dockerfile = (ROOT / "ubuntu_v2" / "docker" / "Dockerfile.gateway").read_text()
@@ -39,6 +50,32 @@ class ServerImageTests(unittest.TestCase):
         self.assertIn("ros-humble-cv-bridge", dockerfile)
         self.assertIn("COPY orchard_mapper", dockerfile)
         self.assertIn("colcon build --merge-install", dockerfile)
+
+    def test_robot_transport_uses_dedicated_compute_port(self):
+        server_compose = (ROOT / "ubuntu_v2" / "compose.yaml").read_text()
+        robot_compose = (ROOT / "robot_docker" / "compose.yaml").read_text()
+        server_transport = (
+            ROOT / "ubuntu_v2" / "zenoh" / "server-transport.json5"
+        ).read_text()
+        robot_transport = (
+            ROOT / "robot_docker" / "zenoh" / "robot-transport.json5"
+        ).read_text()
+
+        self.assertIn("server-transport.json5", server_compose)
+        self.assertIn("robot-transport.json5", robot_compose)
+        self.assertIn("172.30.1.10:7448", server_transport)
+        self.assertIn("0.0.0.0:7448", robot_transport)
+        self.assertIn('mode: "client"', server_transport)
+        self.assertIn('mode: "router"', robot_transport)
+        self.assertIn("allow:", server_transport)
+        self.assertIn('"/cmd_vel_server"', server_transport)
+        self.assertNotIn('"/scan_fixed"', server_transport)
+        self.assertIn('"/scan"', robot_transport)
+        self.assertNotIn('"/cmd_vel"', robot_transport)
+        self.assertIn('"/autonomous_mapping/(start|stop|save|preview)"', robot_transport)
+        self.assertIn('"/navigate_to_pose"', server_transport)
+        self.assertIn("ros_localhost_only: true", robot_transport)
+        self.assertIn('ROS_LOCALHOST_ONLY: "1"', robot_compose)
 
     def test_mapping_server_enables_new_visual_mapper(self):
         entrypoint = (ROOT / "robot_docker" / "entrypoint.sh").read_text()

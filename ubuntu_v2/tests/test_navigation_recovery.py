@@ -211,7 +211,11 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("observation_sources: scan camera", nav_params_text)
         self.assertIn("topic: /camera_scan", nav_params_text)
         self.assertIn("default_server_timeout: 1000", nav_params_text)
-        self.assertIn("min_speed_theta: 0.18", nav_params_text)
+        self.assertIn("min_speed_theta: 0.0", nav_params_text)
+        self.assertIn("required_movement_radius: 0.05", nav_params_text)
+        self.assertIn("movement_time_allowance: 45.0", nav_params_text)
+        self.assertIn("bt_loop_duration: 100", nav_params_text)
+        self.assertIn("transform_timeout: 0.05", params_text)
         self.assertIn("throttle_scans: 1", params_text)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:

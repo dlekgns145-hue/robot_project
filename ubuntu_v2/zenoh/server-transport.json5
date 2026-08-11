@@ -1,0 +1,34 @@
+{
+  id: "20",
+  // The compute host only initiates one outbound session to the robot. Client
+  // mode avoids opening a second LAN listener (the router default is 7447).
+  mode: "client",
+  connect: { endpoints: ["tcp/172.30.1.10:7448"] },
+  scouting: { multicast: { enabled: false }, gossip: { enabled: false } },
+  plugins: {
+    ros2dds: {
+      nodename: "server_ros_transport",
+      domain: 20,
+      ros_localhost_only: true,
+      // This is the exact reciprocal of the robot allow-list. Derived scans,
+      // odometry, TF, costmaps and motor output never loop back through Zenoh.
+      allow: {
+        publishers: [
+          "/cmd_vel_server",
+          "/cmd_bridge/navigation_lease",
+          "/amcl_pose",
+          "/autonomous_mapping/status"
+        ],
+        subscribers: [
+          "/scan",
+          "/odom_raw",
+          "/cmd_bridge/emergency_stop"
+        ],
+        service_servers: ["/autonomous_mapping/(start|stop|save|preview)"],
+        service_clients: [],
+        action_servers: ["/navigate_to_pose"],
+        action_clients: []
+      }
+    }
+  }
+}

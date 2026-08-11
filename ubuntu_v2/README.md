@@ -42,8 +42,11 @@ Ubuntu VM Docker: gateway + compute-mapping
 끊기면 로봇이 서버와 독립적으로 정지합니다.
 
 UTM은 `Shared Network`를 사용합니다. DDS 멀티캐스트는 NAT를 통과하지 않으므로
-로봇과 서버의 `zenoh-bridge-ros2dds`가 ROS 토픽·서비스·액션을 TCP 7447 하나로
-전달합니다. DDS는 각 장치의 localhost에만 묶여 브리지 중복 루프를 방지합니다.
+로봇과 서버의 `zenoh-bridge-ros2dds`가 허용 목록에 지정한 원시 센서와 원격 제어
+토픽·서비스·액션만 전용 TCP 7448 하나로 전달합니다. DDS는 각 장치의 localhost에만
+묶이며, 서버에서 가공한 지도·TF·오도메트리는 로봇으로 되돌아가지 않습니다.
+한 로봇에는 연산 서버 한 대만 이 포트로 연결해야 합니다. 이전 서버를 동시에
+연결하면 센서와 `/cmd_vel` 발행자가 중복되므로 새 서버 전환 시 포트를 분리합니다.
 GUI는 Mac의 `127.0.0.1:9999` 포워딩으로 gateway에 접속합니다.
 
 서버 연산 런타임 실행:

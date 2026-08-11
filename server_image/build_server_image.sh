@@ -13,6 +13,7 @@ cleanup() {
 trap cleanup EXIT
 
 install -d "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/docker" \
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/zenoh" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/robot_app" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/systemd" \
@@ -28,6 +29,8 @@ cp -a "${PROJECT_DIR}/orchard_mapper/." \
     "${STAGING_DIR}/${IMAGE_NAME}/orchard_mapper/"
 cp -a "${PROJECT_DIR}/ubuntu_v2/docker/." \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/docker/"
+cp -a "${PROJECT_DIR}/ubuntu_v2/zenoh/." \
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/zenoh/"
 cp -a \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/config.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/robot_locator.py" \

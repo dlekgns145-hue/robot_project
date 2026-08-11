@@ -8,11 +8,10 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/robot-control-server/ubuntu_v2
-ExecStart=/usr/bin/docker compose --profile compute up -d gateway ros-transport compute-mapping
+ExecStart=/opt/robot-control-server/ubuntu_v2/scripts/run_compute_mapping.sh
 ExecStop=/usr/bin/docker compose --profile compute stop compute-mapping ros-transport gateway
 TimeoutStartSec=0
 TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target
-

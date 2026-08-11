@@ -118,8 +118,9 @@ services:
       ros-transport:
         condition: service_started
 
-  # UTM Shared/NAT cannot carry DDS multicast. Zenoh transports the complete
-  # ROS graph over one outbound TCP connection to the robot.
+  # UTM Shared/NAT cannot carry DDS multicast. Zenoh transports only the
+  # allow-listed raw sensors and remote-control interfaces over one outbound
+  # TCP connection to the robot; derived server topics never loop back.
   ros-transport:
     image: ${ZENOH_BRIDGE_IMAGE:-eclipse/zenoh-bridge-ros2dds:latest}
     container_name: robot-v2-ros-transport
@@ -133,7 +134,9 @@ services:
       ROS_DISTRO: humble
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
       ROS_LOCALHOST_ONLY: "1"
-    command: ["-e", "tcp/${ROBOT_IP:-172.30.1.10}:7447"]
+    volumes:
+      - ./zenoh/server-transport.json5:/etc/zenoh/transport.json5:ro
+    command: ["-c", "/etc/zenoh/transport.json5"]
 
   # Optional legacy/direct mode for robots whose micro-ROS board connects straight
   # to this VM. It is deliberately not started by the default `compose up`.

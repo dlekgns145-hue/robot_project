@@ -50,8 +50,9 @@ services:
         max-size: 10m
         max-file: "3"
 
-  # TCP ROS transport for UTM Shared/NAT deployments. The server bridge
-  # connects to this listener at tcp/<robot-ip>:7447.
+  # TCP ROS transport for UTM Shared/NAT deployments. Port 7448 is dedicated
+  # to the active compute server; the old 7447 endpoint must not be shared by
+  # two compute servers because duplicate /cmd_vel and sensor writers result.
   ros-transport:
     image: ${ZENOH_BRIDGE_IMAGE:-eclipse/zenoh-bridge-ros2dds:latest}
     container_name: robot-ros-transport
@@ -63,6 +64,9 @@ services:
       ROS_DISTRO: "humble"
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
+    volumes:
+      - ./zenoh/robot-transport.json5:/etc/zenoh/transport.json5:ro
+    command: ["-c", "/etc/zenoh/transport.json5"]
     logging:
       driver: json-file
       options:
@@ -99,6 +103,8 @@ services:
       SERVER_MAX_LINEAR_SPEED: "0.12"
       SERVER_MAX_ANGULAR_SPEED: "0.18"
       SERVER_MIN_ANGULAR_SPEED: "0.18"
+      SERVER_PURE_ROTATION_LINEAR_EPSILON: "0.01"
+      SERVER_DRIVING_ANGULAR_DEADBAND: "0.03"
       NAVIGATION_LEASE_TIMEOUT_SEC: "2.5"
 
   camera:

@@ -1,0 +1,34 @@
+{
+  id: "10",
+  mode: "router",
+  listen: { endpoints: ["tcp/0.0.0.0:7448"] },
+  scouting: { multicast: { enabled: false }, gossip: { enabled: false } },
+  plugins: {
+    ros2dds: {
+      nodename: "robot_ros_transport",
+      domain: 20,
+      ros_localhost_only: true,
+      // Export only raw sensors and the safety/control interfaces that cross
+      // the robot/server boundary. An allow-list prevents a remote proxy from
+      // being re-exported and appearing as a second publisher on the robot.
+      allow: {
+        publishers: [
+          "/scan",
+          "/odom_raw",
+          "/cmd_bridge/emergency_stop"
+        ],
+        subscribers: [
+          "/cmd_vel_server",
+          "/cmd_bridge/navigation_lease",
+          "/amcl_pose",
+          "/autonomous_mapping/status"
+        ],
+        service_servers: [],
+        service_clients: ["/autonomous_mapping/(start|stop|save|preview)"],
+        action_servers: [],
+        action_clients: ["/navigate_to_pose"]
+      },
+      pub_max_frequencies: ["/scan=15", "/odom_raw=15"]
+    }
+  }
+}

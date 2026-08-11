@@ -11,6 +11,7 @@ sys.path.insert(0, str(DOCKER_DIR))
 
 from frontier_core import (  # noqa: E402
     GridSpec,
+    cell_has_obstacle_clearance,
     cluster_frontiers,
     frontier_candidates,
     frontier_cell_indices,
@@ -143,6 +144,32 @@ class FrontierCoreTests(unittest.TestCase):
         self.assertLessEqual(candidates[0].distance, 1.26)
         goal_index = candidates[0].grid_y * spec.width + candidates[0].grid_x
         self.assertEqual(data[goal_index], 0)
+
+    def test_goal_too_close_to_occupied_cell_is_rejected(self) -> None:
+        spec = GridSpec(width=9, height=9, resolution=0.1)
+        data = [-1] * (spec.width * spec.height)
+        for y in range(1, 8):
+            for x in range(1, 8):
+                data[y * spec.width + x] = 0
+        obstacle_index = 4 * spec.width + 6
+        data[obstacle_index] = 100
+
+        self.assertFalse(
+            cell_has_obstacle_clearance(
+                data,
+                spec,
+                4 * spec.width + 4,
+                clearance_m=0.25,
+            )
+        )
+        self.assertTrue(
+            cell_has_obstacle_clearance(
+                data,
+                spec,
+                4 * spec.width + 2,
+                clearance_m=0.25,
+            )
+        )
 
     def test_blacklist_excludes_only_nearby_part_of_cluster(self) -> None:
         spec = GridSpec(width=5, height=5, resolution=0.2)

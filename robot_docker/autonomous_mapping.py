@@ -36,7 +36,9 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("startup_delay", 8.0)
         # Allow Nav2's progress checker and recovery tree to finish a bounded
         # spin/backup cycle before the frontier goal is cancelled.
-        self.declare_parameter("goal_timeout", 75.0)
+        self.declare_parameter("goal_timeout", 120.0)
+        self.declare_parameter("goal_retry_delay", 3.0)
+        self.declare_parameter("maximum_consecutive_goal_failures", 5)
         self.declare_parameter("minimum_runtime", 60.0)
         self.declare_parameter("minimum_completion_travel_distance", 1.0)
         self.declare_parameter("maximum_runtime", 1800.0)
@@ -44,11 +46,12 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("minimum_frontier_length", 0.35)
         self.declare_parameter("minimum_goal_distance", 0.45)
         self.declare_parameter("maximum_goal_distance", 7.0)
-        self.declare_parameter("maximum_goal_step_distance", 1.25)
-        self.declare_parameter("frontier_goal_standoff", 0.10)
+        self.declare_parameter("maximum_goal_step_distance", 1.0)
+        self.declare_parameter("frontier_goal_standoff", 0.35)
+        self.declare_parameter("minimum_goal_obstacle_clearance", 0.28)
         self.declare_parameter("maximum_exploration_radius", 25.0)
         self.declare_parameter("blacklist_radius", 0.7)
-        self.declare_parameter("failed_goal_blacklist_seconds", 20.0)
+        self.declare_parameter("failed_goal_blacklist_seconds", 90.0)
         self.declare_parameter("reached_goal_blacklist_seconds", 6.0)
         self.declare_parameter("map_output", "/opt/robot-control/maps/orchard_map")
 
@@ -106,7 +109,11 @@ class AutonomousMappingNode(Node):
         self.goal_candidate = None
         self.goal_handle = None
         self.goal_request_pending = False
+        self.goal_cancel_pending = False
+        self.goal_generation = 0
         self.goal_sent_at = 0.0
+        self.next_goal_not_before = 0.0
+        self.consecutive_goal_failures = 0
         self.distance_remaining = None
         self.blacklist: list[tuple[float, float, float]] = []
         self.travel_distance = 0.0
@@ -151,6 +158,9 @@ class AutonomousMappingNode(Node):
         self.empty_map_count = 0
         self.last_empty_map_sequence = -1
         self.blacklist.clear()
+        self.goal_cancel_pending = False
+        self.next_goal_not_before = 0.0
+        self.consecutive_goal_failures = 0
         self.travel_distance = 0.0
         self.last_travel_pose = self.start_pose
         self.saved_map = ""
@@ -215,10 +225,12 @@ class AutonomousMappingNode(Node):
     def _stop_exploration(self, reason: str) -> None:
         self.enabled = False
         self.state = "stopped"
-        if self.goal_handle is not None:
+        self.goal_generation += 1
+        if self.goal_handle is not None and not self.goal_cancel_pending:
             self.goal_handle.cancel_goal_async()
         self.goal_handle = None
         self.goal_request_pending = False
+        self.goal_cancel_pending = False
         self.goal_candidate = None
         self._publish_zero()
         self._set_navigation_mode(False)
@@ -266,6 +278,9 @@ class AutonomousMappingNode(Node):
             maximum_goal_step_distance=float(
                 self.get_parameter("maximum_goal_step_distance").value
             ),
+            minimum_obstacle_clearance=float(
+                self.get_parameter("minimum_goal_obstacle_clearance").value
+            ),
         )
         start_x, start_y = self.start_pose or (robot_x, robot_y)
         max_radius = float(self.get_parameter("maximum_exploration_radius").value)
@@ -302,11 +317,17 @@ class AutonomousMappingNode(Node):
 
         if self.goal_handle is not None:
             timeout = float(self.get_parameter("goal_timeout").value)
-            if now - self.goal_sent_at >= timeout:
+            if now - self.goal_sent_at >= timeout and not self.goal_cancel_pending:
+                self.goal_cancel_pending = True
+                self.state = "cancelling_timed_out_goal"
                 self.get_logger().warn("frontier goal timed out; cancelling")
                 self.goal_handle.cancel_goal_async()
+                self._publish_status("frontier goal timed out; cancelling once")
             return
         if self.goal_request_pending:
+            return
+        if now < self.next_goal_not_before:
+            self.state = "goal_retry_cooldown"
             return
         if elapsed < float(self.get_parameter("startup_delay").value):
             return
@@ -372,6 +393,9 @@ class AutonomousMappingNode(Node):
         goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
         self.goal_candidate = candidate
         self.goal_request_pending = True
+        self.goal_cancel_pending = False
+        self.goal_generation += 1
+        generation = self.goal_generation
         self.goal_sent_at = self._seconds()
         self.distance_remaining = candidate.distance
         self.state = "sending_goal"
@@ -380,30 +404,43 @@ class AutonomousMappingNode(Node):
         future = self.navigator.send_goal_async(
             goal, feedback_callback=self._on_feedback
         )
-        future.add_done_callback(self._on_goal_response)
+        future.add_done_callback(
+            lambda completed, goal_generation=generation: self._on_goal_response(
+                completed, goal_generation
+            )
+        )
 
-    def _on_goal_response(self, future) -> None:
+    def _on_goal_response(self, future, generation: int) -> None:
+        if generation != self.goal_generation:
+            try:
+                stale_handle = future.result()
+                if stale_handle.accepted:
+                    stale_handle.cancel_goal_async()
+            except Exception:
+                pass
+            return
         self.goal_request_pending = False
         try:
             handle = future.result()
         except Exception as error:  # rclpy future transports exceptions here
-            self._blacklist_current(True)
-            self.state = "goal_error"
-            self._publish_status(f"goal request failed: {error}")
+            self._finish_goal_failure(f"goal request failed: {error}")
             return
         if not handle.accepted:
-            self._blacklist_current(True)
-            self.state = "goal_rejected"
-            self._publish_status("frontier goal rejected")
+            self._finish_goal_failure("frontier goal rejected")
             return
         self.goal_handle = handle
         if not self.enabled:
+            self.goal_cancel_pending = True
             handle.cancel_goal_async()
             return
         self.state = "navigating"
         self._publish_status("frontier goal accepted")
         result_future = handle.get_result_async()
-        result_future.add_done_callback(self._on_goal_result)
+        result_future.add_done_callback(
+            lambda completed, goal_generation=generation: self._on_goal_result(
+                completed, goal_generation
+            )
+        )
 
     def _on_feedback(self, feedback_message) -> None:
         self.distance_remaining = float(feedback_message.feedback.distance_remaining)
@@ -422,22 +459,59 @@ class AutonomousMappingNode(Node):
         )
         self.goal_candidate = None
 
-    def _on_goal_result(self, future) -> None:
+    def _finish_goal_failure(self, message: str) -> None:
+        """Blacklist one bad region and stop safely after repeated failures."""
+
+        self._blacklist_current(True)
+        self.distance_remaining = None
+        self.goal_cancel_pending = False
+        if not self.enabled:
+            return
+        self.consecutive_goal_failures += 1
+        maximum_failures = int(
+            self.get_parameter("maximum_consecutive_goal_failures").value
+        )
+        if maximum_failures > 0 and self.consecutive_goal_failures >= maximum_failures:
+            failure_message = (
+                f"{message}; stopped after {self.consecutive_goal_failures} "
+                "consecutive frontier failures"
+            )
+            self._stop_exploration(failure_message)
+            self._request_map_save("saving partial map after navigation failures")
+            return
+        self.next_goal_not_before = self._seconds() + float(
+            self.get_parameter("goal_retry_delay").value
+        )
+        self.state = "goal_failed"
+        self._publish_status(
+            f"{message}; retry {self.consecutive_goal_failures}/{maximum_failures} "
+            "after cooldown"
+        )
+
+    def _on_goal_result(self, future, generation: int) -> None:
+        if generation != self.goal_generation:
+            return
         self.goal_handle = None
+        self.goal_cancel_pending = False
+        if not self.enabled:
+            self.goal_candidate = None
+            self.distance_remaining = None
+            return
         try:
             status = int(future.result().status)
         except Exception as error:
-            self._blacklist_current(True)
-            self.state = "goal_error"
-            self._publish_status(f"goal result failed: {error}")
+            self._finish_goal_failure(f"goal result failed: {error}")
             return
         succeeded = status == GoalStatus.STATUS_SUCCEEDED
-        self._blacklist_current(not succeeded)
+        if not succeeded:
+            self._finish_goal_failure(f"frontier failed with status={status}")
+            return
+        self._blacklist_current(False)
         self.distance_remaining = None
-        self.state = "goal_reached" if succeeded else "goal_failed"
-        self._publish_status(
-            "frontier reached" if succeeded else f"frontier failed with status={status}"
-        )
+        self.consecutive_goal_failures = 0
+        self.next_goal_not_before = 0.0
+        self.state = "goal_reached"
+        self._publish_status("frontier reached")
 
     def _request_map_save(self, reason: str) -> bool:
         if self.save_pending:
@@ -493,6 +567,8 @@ class AutonomousMappingNode(Node):
             "saved_map": self.saved_map,
             "save_sequence": self.save_sequence,
             "travel_distance": round(self.travel_distance, 3),
+            "consecutive_goal_failures": self.consecutive_goal_failures,
+            "goal_cancel_pending": self.goal_cancel_pending,
         }
         if self.goal_candidate is not None:
             payload["goal"] = asdict(self.goal_candidate)

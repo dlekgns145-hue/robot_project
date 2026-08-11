@@ -180,7 +180,25 @@ class CommandLeaseTests(unittest.TestCase):
 
         self.assertEqual(len(node.pub.messages), 1)
         self.assertAlmostEqual(node.pub.messages[0].linear.x, 0.1)
-        self.assertAlmostEqual(node.pub.messages[0].angular.z, -0.18)
+        self.assertAlmostEqual(node.pub.messages[0].angular.z, -0.1)
+
+    def test_pure_rotation_is_boosted_over_motor_deadzone(self) -> None:
+        linear, angular = self.bridge.shape_server_velocity(0.0, 0.08)
+
+        self.assertEqual(linear, 0.0)
+        self.assertAlmostEqual(angular, 0.18)
+
+    def test_small_driving_steering_noise_is_removed(self) -> None:
+        linear, angular = self.bridge.shape_server_velocity(0.08, -0.02)
+
+        self.assertAlmostEqual(linear, 0.08)
+        self.assertEqual(angular, 0.0)
+
+    def test_server_velocity_is_clamped(self) -> None:
+        linear, angular = self.bridge.shape_server_velocity(1.0, -1.0)
+
+        self.assertAlmostEqual(linear, 0.12)
+        self.assertAlmostEqual(angular, -0.18)
 
     def test_navigation_lease_enables_and_disables_motor_ownership(self) -> None:
         node = self.make_node()

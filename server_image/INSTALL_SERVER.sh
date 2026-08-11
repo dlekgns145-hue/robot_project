@@ -133,7 +133,8 @@ if ! systemctl is-active --quiet docker.service; then
 fi
 
 echo "Installing server application into ${INSTALL_DIR}..."
-install -d "${INSTALL_DIR}/ubuntu_v2" "${INSTALL_DIR}/robot_docker" \
+install -d "${INSTALL_DIR}/ubuntu_v2" "${INSTALL_DIR}/ubuntu_v2/zenoh" \
+    "${INSTALL_DIR}/robot_docker" \
     "${INSTALL_DIR}/orchard_mapper"
 
 # Preserve generated maps, the operations database, and the active .env when
@@ -142,6 +143,7 @@ cp -a "${SOURCE_DIR}/ubuntu_v2/docker" "${INSTALL_DIR}/ubuntu_v2/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/robot_app" "${INSTALL_DIR}/ubuntu_v2/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/scripts" "${INSTALL_DIR}/ubuntu_v2/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/systemd" "${INSTALL_DIR}/ubuntu_v2/"
+cp -a "${SOURCE_DIR}/ubuntu_v2/zenoh/." "${INSTALL_DIR}/ubuntu_v2/zenoh/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/compose.yaml" "${INSTALL_DIR}/ubuntu_v2/compose.yaml"
 cp -a "${SOURCE_DIR}/ubuntu_v2/.env.example" "${INSTALL_DIR}/ubuntu_v2/.env.example"
 cp -a "${SOURCE_DIR}/orchard_mapper/." "${INSTALL_DIR}/orchard_mapper/"
@@ -182,6 +184,10 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 else
     echo "Preserving the existing ${ENV_FILE}."
 fi
+# Operators added to the docker group must be able to run the documented
+# compose checks without exposing the command token to every local account.
+chown root:docker "${ENV_FILE}"
+chmod 0640 "${ENV_FILE}"
 
 if [[ -z "${COMMAND_TOKEN}" ]]; then
     COMMAND_TOKEN="$(sed -n 's/^COMMAND_TOKEN=//p' "${ENV_FILE}" | tail -n 1)"
