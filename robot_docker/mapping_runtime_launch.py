@@ -1,8 +1,27 @@
-"""Start autonomous SLAM exploration on the finite navigation sensor pipeline.
+"""mapping_runtime_launch.py - 자율 SLAM 매핑 런타임 ROS 2 Launch 파일
+-----------------------------------------------------------------------
+[매핑 기능 커스텀/뜯어고치기 안내]
+이 launch 파일은 자율 매핑을 수행하기 위해 아래 노드들을 통합 실행합니다:
 
-The vendor base and EKF publish stale or non-finite transforms on ``/tf``.
-Mapping therefore shares Nav2's isolated ``/tf_nav`` channel. Exploration is
-disabled at launch and starts only through ``/autonomous_mapping/start``.
+1. scan_time_fix.py:
+   - 센서 타임스탬프 보정 및 노이즈/자기반사(Self-reflection) 필터링
+   - /scan -> /scan_fixed (내비게이션용) 및 /scan_slam (SLAM용 4m 컷오프)
+
+2. odom_relay.py:
+   - 오도메트리 데이터 검증 및 /tf_nav 분리 리레이 (NaN/Inf 튀는 현상 방지)
+
+3. slam_toolbox (async_slam_toolbox_node):
+   - 2D LiDAR 데이터 기반 실시간 SLAM 점유 격자 지도(/map) 생성 노드
+
+4. Nav2 (navigation_launch.py):
+   - 경로 계획(Planner) 및 추종(Controller) 알고리즘 (DWB Planner)
+   - 매핑 전용 파라미터 재설정 (yaw_goal_tolerance 3.14로 완화하여 목표 방향 맞춤 부담 감소)
+
+5. map_saver (nav2_map_server):
+   - 자율 탐색 완료 시 지도를 파일(*.pgm, *.yaml)로 저장하는 서버 서비스
+
+6. autonomous_mapping.py:
+   - 경계선(Frontier) 탐색 알고리즘을 수행하는 메인 조정자 노드
 """
 
 from ament_index_python.packages import get_package_share_directory
@@ -17,6 +36,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
 from nav2_common.launch import RewrittenYaml
+
 
 
 def generate_launch_description():

@@ -1,4 +1,17 @@
-"""Load the LiDAR SLAM occupancy map for remote clients."""
+"""map_payload.py - 데스크톱 GUI용 LiDAR 점유 격자 지도(Occupancy Grid) 페이로드 로더
+----------------------------------------------------------------------------------
+[매핑 기능 커스텀/뜯어고치기 안내]
+이 모듈은 로봇에 저장된 *.pgm 및 *.yaml 지도 파일이나 실시간 탐색 중 생성되는 매핑 스트림을 읽어
+네트워크(TCP/WebSocket)를 통해 GUI로 효율적으로 전송하기 위한 zlib+base64 압축 데이터 딕셔너리를 구성합니다.
+
+[핵심 기능]
+1. _select_map_name():
+   - 최신 실시간 자율 매핑이 진행 중이면 `orchard_map_live`를 우선 선택하고,
+     정지 상태이거나 저장본을 원할 경우 정적 저장 지도 `orchard_map`을 선택합니다.
+2. load_map_payload():
+   - PGM 이미지 바이트 데이터를 읽고 zlib 압축 + base64 인코딩하여 페이로드 크기를 90% 이상 압축
+   - 해상도(resolution), 원점(origin_x, origin_y, origin_yaw), 문턱값 메타데이터 포함
+"""
 
 from __future__ import annotations
 
@@ -11,6 +24,7 @@ import time
 import zlib
 from pathlib import Path
 from typing import Any
+
 
 
 def _metadata(path: Path) -> dict[str, str]:

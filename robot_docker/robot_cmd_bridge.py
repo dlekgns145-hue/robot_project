@@ -738,7 +738,14 @@ class CmdBridgeNode(Node):
             raise ValueError("navigation coordinates must be finite")
         with self.lock:
             if self._remote_nav_active:
-                raise ValueError("navigation goal is already active")
+                old_handle = self._remote_nav_goal_handle
+                if old_handle is not None:
+                    try:
+                        old_handle.cancel_goal_async()
+                    except Exception:
+                        pass
+                self._remote_nav_active = False
+                self._remote_nav_goal_handle = None
             self._remote_nav_state = "sending"
             self._remote_nav_active = True
             self._remote_nav_message = "Nav2 목표 전송 중"
@@ -752,22 +759,26 @@ class CmdBridgeNode(Node):
             self._remote_nav_cancel_requested = False
             self._remote_nav_owns_mode = True
 
-        if not self.navigator.wait_for_server(timeout_sec=0.5):
+        if not self.navigator.wait_for_server(timeout_sec=2.0):
             self._finish_remote_navigation("error", "Nav2 action server가 준비되지 않음")
             raise ValueError("Nav2 action server is not ready")
 
-        self._set_navigation_control(True)
-        goal = NavigateToPose.Goal()
-        goal.pose.header.frame_id = "map"
-        goal.pose.header.stamp = self.get_clock().now().to_msg()
-        goal.pose.pose.position.x = float(x)
-        goal.pose.pose.position.y = float(y)
-        goal.pose.pose.orientation.z = math.sin(float(yaw) / 2.0)
-        goal.pose.pose.orientation.w = math.cos(float(yaw) / 2.0)
-        future = self.navigator.send_goal_async(
-            goal, feedback_callback=self._on_navigation_feedback
-        )
-        future.add_done_callback(self._on_navigation_goal_response)
+        try:
+            self._set_navigation_control(True)
+            goal = NavigateToPose.Goal()
+            goal.pose.header.frame_id = "map"
+            goal.pose.header.stamp = self.get_clock().now().to_msg()
+            goal.pose.pose.position.x = float(x)
+            goal.pose.pose.position.y = float(y)
+            goal.pose.pose.orientation.z = math.sin(float(yaw) / 2.0)
+            goal.pose.pose.orientation.w = math.cos(float(yaw) / 2.0)
+            future = self.navigator.send_goal_async(
+                goal, feedback_callback=self._on_navigation_feedback
+            )
+            future.add_done_callback(self._on_navigation_goal_response)
+        except Exception as error:
+            self._finish_remote_navigation("error", f"Nav2 목표 전송 예외: {error}")
+            raise
 
     def _on_navigation_goal_response(self, future):
         try:

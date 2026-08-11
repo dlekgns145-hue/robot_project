@@ -187,6 +187,32 @@ class GatewayProtocolTests(unittest.TestCase):
         self.assertEqual(status["last_robot_ip"], "172.30.1.18")
         self.assertEqual(status["last_discovery_method"], "mac-neighbor")
 
+    def test_rejected_command_does_not_close_connection(self) -> None:
+        class MockConnection:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def sendall(self, payload: bytes) -> None:
+                pass
+
+            def recv(self, _size: int) -> bytes:
+                return b'{"ok":false,"error":"navigation goal is already active"}\n'
+
+            def close(self) -> None:
+                self.closed = True
+
+        relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+        mock_conn = MockConnection()
+        relay.connection = mock_conn  # type: ignore[assignment]
+
+        success = relay.send({"type": "navigate", "x": 1.0, "y": 1.0})
+
+        self.assertFalse(success)
+        self.assertEqual(relay.last_error, "navigation goal is already active")
+        self.assertFalse(mock_conn.closed)
+        self.assertIsNotNone(relay.connection)
+
 
 if __name__ == "__main__":
     unittest.main()
+

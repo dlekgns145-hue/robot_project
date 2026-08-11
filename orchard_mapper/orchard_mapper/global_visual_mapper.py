@@ -1,4 +1,17 @@
-"""Place camera BEV frames in ROS map coordinates and maintain a mosaic."""
+"""global_visual_mapper.py - 카메라 버드아이뷰(BEV) 전역 시각 지도 모자이크 및 오버레이 생성 노드
+-----------------------------------------------------------------------------------------
+[매핑 기능 커스텀/뜯어고치기 안내]
+이 노드는 로봇 카메라 영상에서 변환된 탑뷰/조감도(Bird's Eye View, BEV) 이미지 및 소재 탐지 마스크를
+ROS map 좌표계(TF)와 동기화하여 전역 시각 지도 모자이크(Visual Map Canvas)를 구축합니다.
+
+[핵심 기능]
+1. BevGeometry & MapGeometry:
+   - 카메라 뷰의 전방/측면 영역(m)을 점유 격자 지도(Occupancy Grid)의 픽셀 좌표계로 투영
+2. WeightedCanvas (image_blender.py):
+   - 위치별 관측 거리 및 중앙 가중치(Distance Weighting)를 부여하여 여러 카메라 프레임을 자연스럽게 합성
+3. save_visual_map (map_saver.py):
+   - 합성된 시각 오버레이 이미지를 PNG 포맷 및 Base64 형태로 인코딩하여 GUI 컨트롤 센터로 전송
+"""
 
 from __future__ import annotations
 
@@ -34,8 +47,11 @@ from .map_saver import save_visual_map
 
 
 class GlobalVisualMapper(Node):
+    """카메라 BEV 영상을 지도에 융합하는 시각 매퍼 노드 클래스"""
+
     def __init__(self) -> None:
         super().__init__("orchard_visual_mapper")
+
         self._declare_parameters()
         self.bridge = CvBridge()
         self.map_frame = str(self.get_parameter("map_frame").value)

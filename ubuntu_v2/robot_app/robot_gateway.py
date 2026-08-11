@@ -38,8 +38,13 @@ ROBOT_NAME = os.getenv("ROBOT_NAME", "Yahboom Robot 1")
 STOP_EVENT = threading.Event()
 
 
+class CommandRejectedError(ValueError):
+    """Raised when the robot bridge returns a logical rejection (ok=False) without a socket fault."""
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
 
 
 def legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -248,10 +253,12 @@ class RobotRelay:
         response = json.loads(raw)
         if not isinstance(response, dict):
             raise ValueError("robot bridge response must be an object")
-        if not response.get("ok", False):
-            raise ValueError(str(response.get("error") or "robot command rejected"))
         self._robot_response = response
         self.last_sent_at = time.monotonic()
+        if not response.get("ok", False):
+            raise CommandRejectedError(
+                str(response.get("error") or "robot command rejected")
+            )
         return response
 
     def send(self, command: dict[str, Any]) -> bool:
@@ -267,6 +274,11 @@ class RobotRelay:
                 self.applied_angular = float(command.get("angular", 0.0))
                 self.last_error = ""
                 return True
+            except CommandRejectedError as error:
+                self.last_error = str(error)
+                self.applied_linear = 0.0
+                self.applied_angular = 0.0
+                return False
             except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as error:
                 self.last_error = str(error)
                 # A bridge restart does not imply that the robot's DHCP IP changed.

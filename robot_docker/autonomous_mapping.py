@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""Safely explore occupancy-grid frontiers and save the completed map."""
+"""autonomous_mapping.py - 경계선(Frontier) 탐색 기반 자율 매핑 및 지능형 지도 자동 저장 노드
+-----------------------------------------------------------------------------------------
+[매핑 기능 커스텀/뜯어고치기 안내]
+이 노드는 실시간 /map (OccupancyGrid) 데이터를 분석하여 탐색 가능한 미지의 경계선(Frontier) 후보를 발굴하고,
+Nav2 액션 서버(`/navigate_to_pose`)를 통해 로봇을 자율적으로 이동시켜 지도를 넓혀갑니다.
+
+[핵심 작동 원리 & 상태 머신 (State Machine)]
+1. 'starting': 매핑 런타임 시작 후 /map 수신 및 위치 추정(TF) 초기화 대기 (startup_delay)
+2. 'exploring': 경계선 탐색 중
+   - /map 데이터 수신 -> frontier_core의 frontier_candidates()로 미탐색-주행가능 경계선 계산
+   - 로봇 위치에서 이동 가능한 경계선 중 적절한 거리/장애물 이격을 가진 목표(Goal) 선정
+   - Nav2 /navigate_to_pose 목표 전송 및 /cmd_bridge/navigation_lease 모터 임대 갱신
+   - 특정 경계선 이동에 실패하면 해당 위치를 블랙리스트(blacklist)에 등록하여 재진입 방지
+3. 'saving': 매핑 완료 또는 사용자의 저장 요청 시 /map_saver/save_map 서비스 호출 후 mapping_core의 promote_saved_map()으로 원자적 저장
+4. 'completed' / 'idle': 탐색 완료 또는 수동 정지 상태
+
+[주요 조정 매개변수 (Parameters)]
+- decision_period: 매핑 판단 루프 주기 (기본 1.0초)
+- minimum_frontier_length: 유효한 경계선 최소 길이 (기본 0.35m)
+- maximum_goal_distance: 한 번에 이동할 탐색 목표 최대 거리 (기본 7.0m)
+- frontier_goal_standoff: 경계선과 목표 지점 사이의 안전 이격 거리 (기본 0.35m)
+- minimum_save_known_area_m2: 지도 저장을 허용할 최소 관측 면적 (기본 1.0m²)
+"""
 
 from __future__ import annotations
 
@@ -38,6 +60,8 @@ from mapping_core import (
 
 
 class AutonomousMappingNode(Node):
+    """자율 탐색 매핑 노드 메인 클래스"""
+
     def __init__(self) -> None:
         super().__init__("autonomous_mapping")
         self.declare_parameter("start_enabled", False)

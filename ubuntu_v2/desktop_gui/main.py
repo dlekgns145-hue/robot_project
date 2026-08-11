@@ -995,7 +995,7 @@ class MainWindow(QMainWindow):
             "Navigation 중지" if self._navigation_active else "Navigation"
         )
         self.map_navigation_button.setEnabled(
-            not self._navigation_active and not self._mapping_active
+            self.robot_connected and not self._mapping_active
         )
 
     def _update_mapping_status(self, mapping: dict) -> None:
@@ -1045,7 +1045,7 @@ class MainWindow(QMainWindow):
         self.mapping_preview_button.setEnabled(available)
         self.navigation_button.setEnabled(not self._mapping_active)
         self.map_navigation_button.setEnabled(
-            not self._mapping_active and not self._navigation_active
+            self.robot_connected and not self._mapping_active
         )
 
         saved_map = str(mapping.get("saved_map") or "")
@@ -1265,8 +1265,6 @@ class MainWindow(QMainWindow):
                 self, "Navigation", "자동 매핑을 먼저 정지한 뒤 목표 주행을 시작하세요."
             )
             return
-        if self._navigation_active:
-            return
         answer = QMessageBox.question(
             self,
             "Navigation 출발 확인",
@@ -1279,13 +1277,17 @@ class MainWindow(QMainWindow):
             return
         self.stop_vision()
         self._save_settings()
+        if self._navigation_active and self.client is not None:
+            self.client.cancel_navigation()
         self.client.navigate_to(
             self.nav_x.value(), self.nav_y.value(), self.nav_yaw.value()
         )
         self._navigation_active = True
         self.navigation_button.setChecked(True)
         self.navigation_button.setText("Navigation 중지")
-        self.map_navigation_button.setEnabled(False)
+        self.map_navigation_button.setEnabled(
+            self.robot_connected and not self._mapping_active
+        )
         self.navigation_status_label.setText("Nav2 목표 전송 중")
         self.append_log(
             "Navigation 시작: "
