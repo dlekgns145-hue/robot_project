@@ -1,0 +1,74 @@
+camera_bev:
+  ros__parameters:
+    # Current phone/robot MJPEG test. Change to "ros" on a camera driver that
+    # publishes /camera/image_raw and /camera/camera_info.
+    input_mode: mjpeg
+    camera_url: http://172.30.1.10:8080/stream.mjpg
+    camera_topic: /camera/image_raw
+    camera_info_topic: /camera/camera_info
+    output_frame: base_link
+    mapping_fps: 3.0
+
+    bev_width: 480
+    bev_height: 640
+    points_normalized: true
+    # Clockwise: far-left, far-right, near-right, near-left.
+    src_points: [0.16, 0.52, 0.84, 0.52, 0.98, 0.98, 0.02, 0.98]
+    dst_points: [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    roi_points: [0.16, 0.52, 0.84, 0.52, 0.98, 0.98, 0.02, 0.98]
+    robot_mask_fraction: 0.10
+    far_mask_weight: 0.20
+    normalize_illumination: true
+
+    # Leave empty when CameraInfo is available. For MJPEG, paste the calibrated
+    # row-major K matrix and distortion vector here.
+    # ROS 2 Humble cannot infer the type of an empty YAML array. A one-value
+    # sentinel means "not calibrated"; a real K matrix must contain 9 values.
+    camera_matrix: [0.0]
+    distortion_coefficients: [0.0]
+    reconnect_delay: 2.0
+
+orchard_visual_mapper:
+  ros__parameters:
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    occupancy_map_topic: /map
+    bev_image_topic: /camera_bev/bev/image
+    bev_mask_topic: /camera_bev/bev/mask
+    visual_map_topic: /orchard_visual_map/image
+
+    bev_width: 480
+    bev_height: 640
+    bev_forward_range: 1.4
+    bev_side_range: 0.75
+
+    map_resolution: 0.02
+    map_origin_x: -20.0
+    map_origin_y: -20.0
+    map_width_m: 40.0
+    map_height_m: 40.0
+    follow_occupancy_geometry: true
+
+    min_translation: 0.12
+    min_rotation: 0.1745329  # 10 degrees, radians
+    accept_rotation_only: false
+    tf_timeout: 0.15
+    # Keep true for arrival-stamped MJPEG. Set false for hardware-stamped ROS
+    # Image messages when strict image/pose synchronization is required.
+    allow_latest_tf_fallback: true
+    feather_pixels: 24
+    observation_weight: 1.0
+    publish_fps: 1.0
+    autosave_interval: 30.0
+
+    output_path: /opt/robot-control/maps/orchard_visual_map
+    frame_db_path: /opt/robot-control/maps/orchard_visual_frames
+    store_frames: true
+    # Optional final per-frame SLAM poses; see README rerender section.
+    corrected_trajectory_path: ""
+
+visual_map_saver:
+  ros__parameters:
+    save_service: /orchard_visual_mapper/save
+    save_interval: 0.0

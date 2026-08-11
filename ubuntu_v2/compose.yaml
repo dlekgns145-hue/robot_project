@@ -19,6 +19,7 @@ x-ros-service: &ros-service
   logging: *service-logging
   profiles: [direct-hardware]
   environment: &ros-environment
+    ROS_DISTRO: humble
     ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
     ROBOT_WORKSPACE_SETUP: ${ROBOT_WORKSPACE_SETUP:-/root/yahboomcar_ros2_ws/install/setup.bash}
 
@@ -101,6 +102,15 @@ services:
       ROBOT_TEXTURE_FAR_M: ${ROBOT_TEXTURE_FAR_M:-2.0}
       ROBOT_TEXTURE_NEAR_WIDTH_M: ${ROBOT_TEXTURE_NEAR_WIDTH_M:-0.85}
       ROBOT_TEXTURE_FAR_WIDTH_M: ${ROBOT_TEXTURE_FAR_WIDTH_M:-1.8}
+      ROBOT_CAMERA_HORIZONTAL_FOV_DEG: ${ROBOT_CAMERA_HORIZONTAL_FOV_DEG:-68.0}
+      ROBOT_CAMERA_VERTICAL_FOV_DEG: ${ROBOT_CAMERA_VERTICAL_FOV_DEG:-50.0}
+      ROBOT_CAMERA_YAW_OFFSET_DEG: ${ROBOT_CAMERA_YAW_OFFSET_DEG:-0.0}
+      ROBOT_CAMERA_PITCH_DOWN_DEG: ${ROBOT_CAMERA_PITCH_DOWN_DEG:-18.0}
+      ROBOT_CAMERA_HEIGHT_M: ${ROBOT_CAMERA_HEIGHT_M:-0.24}
+      ROBOT_LIDAR_X_OFFSET_M: ${ROBOT_LIDAR_X_OFFSET_M:--0.0046}
+      ROBOT_LIDAR_Y_OFFSET_M: ${ROBOT_LIDAR_Y_OFFSET_M:-0.0}
+      ROBOT_OBSTACLE_LAYER_RENDER_PERIOD: ${ROBOT_OBSTACLE_LAYER_RENDER_PERIOD:-2.0}
+      ROBOT_SENSOR_SYNC_MAXIMUM_SKEW: ${ROBOT_SENSOR_SYNC_MAXIMUM_SKEW:-0.18}
     volumes:
       - ./maps:/opt/robot-control/maps
     command: ["mapping-server"]
@@ -114,11 +124,13 @@ services:
     image: ${ZENOH_BRIDGE_IMAGE:-eclipse/zenoh-bridge-ros2dds:latest}
     container_name: robot-v2-ros-transport
     network_mode: host
+    ipc: host
     restart: unless-stopped
     init: true
     profiles: [compute]
     logging: *service-logging
     environment:
+      ROS_DISTRO: humble
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
       ROS_LOCALHOST_ONLY: "1"
     command: ["-e", "tcp/${ROBOT_IP:-172.30.1.10}:7447"]

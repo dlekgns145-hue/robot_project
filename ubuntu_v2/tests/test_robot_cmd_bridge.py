@@ -121,8 +121,11 @@ class CommandLeaseTests(unittest.TestCase):
         node.server_linear = 0.0
         node.server_angular = 0.0
         node.last_server_cmd_at = 0.0
+        node.last_navigation_lease_at = 0.0
+        node.navigation_lease_active = False
         node._last_scan_at = time.monotonic()
         node.front_min_dist = 10.0
+        node.rear_min_dist = 10.0
         node._last_camera_scan_at = 0.0
         node.camera_front_min_dist = float("inf")
         return node
@@ -177,7 +180,19 @@ class CommandLeaseTests(unittest.TestCase):
 
         self.assertEqual(len(node.pub.messages), 1)
         self.assertAlmostEqual(node.pub.messages[0].linear.x, 0.1)
-        self.assertAlmostEqual(node.pub.messages[0].angular.z, -0.1)
+        self.assertAlmostEqual(node.pub.messages[0].angular.z, -0.18)
+
+    def test_navigation_lease_enables_and_disables_motor_ownership(self) -> None:
+        node = self.make_node()
+        message = types.SimpleNamespace(data=True)
+
+        node.navigation_lease_callback(message)
+
+        self.assertTrue(node.navigation_mode)
+        self.assertTrue(node.navigation_lease_active)
+        message.data = False
+        node.navigation_lease_callback(message)
+        self.assertFalse(node.navigation_mode)
 
     def test_stale_server_command_is_stopped_on_robot(self) -> None:
         node = self.make_node()
@@ -196,6 +211,17 @@ class CommandLeaseTests(unittest.TestCase):
         node.last_server_cmd_at = time.monotonic()
         node._last_camera_scan_at = time.monotonic()
         node.camera_front_min_dist = 0.4
+
+        node.control_loop()
+
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+
+    def test_rear_lidar_obstacle_blocks_server_reverse_motion(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = -0.08
+        node.last_server_cmd_at = time.monotonic()
+        node.rear_min_dist = 0.3
 
         node.control_loop()
 

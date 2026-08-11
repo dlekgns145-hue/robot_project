@@ -9,6 +9,7 @@ x-ros-service: &ros-service
   restart: unless-stopped
   init: true
   environment:
+    ROS_DISTRO: "humble"
     ROS_DOMAIN_ID: "20"
     # DDS stays host-local; Zenoh is the only cross-host ROS transport.
     ROS_LOCALHOST_ONLY: "1"
@@ -55,9 +56,11 @@ services:
     image: ${ZENOH_BRIDGE_IMAGE:-eclipse/zenoh-bridge-ros2dds:latest}
     container_name: robot-ros-transport
     network_mode: host
+    ipc: host
     restart: unless-stopped
     init: true
     environment:
+      ROS_DISTRO: "humble"
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
     logging:
@@ -95,6 +98,8 @@ services:
       SERVER_COMMAND_TIMEOUT_SEC: "0.5"
       SERVER_MAX_LINEAR_SPEED: "0.12"
       SERVER_MAX_ANGULAR_SPEED: "0.18"
+      SERVER_MIN_ANGULAR_SPEED: "0.18"
+      NAVIGATION_LEASE_TIMEOUT_SEC: "2.5"
 
   camera:
     <<: *ros-service

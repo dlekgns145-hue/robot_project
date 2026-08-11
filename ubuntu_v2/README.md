@@ -59,6 +59,74 @@ cp -n .env.example .env
 GUI의 `자동 매핑 시작` 확인을 거쳐야 탐색을 시작합니다. 결과 지도는 서버의
 `ubuntu_v2/maps`에 저장되며 gateway가 GUI로 반환합니다.
 
+### 서버 및 휴대폰 카메라 사전 점검
+
+로봇이 없는 날에는 아래 명령으로 서버 자동 시작, 컨테이너, 설정된 로봇 IP와
+ROS 토픽 준비 상태를 확인할 수 있습니다.
+
+```bash
+./scripts/check_server_environment.sh
+```
+
+휴대폰의 IP 카메라 앱이 HTTP/MJPEG 주소를 제공하면 서버 컨테이너에서 먼저
+프레임을 시험합니다. 시험만으로는 영구 설정이 바뀌지 않습니다.
+
+```bash
+./scripts/configure_camera_source.sh \
+  --url http://PHONE_IP:PORT/VIDEO_PATH
+```
+
+프레임 해상도가 정상 출력된 후에만 `--apply`로 적용합니다.
+
+```bash
+sudo ./scripts/configure_camera_source.sh \
+  --url http://PHONE_IP:PORT/VIDEO_PATH --apply
+```
+
+로봇 카메라로 되돌릴 때도 같은 도구를 사용합니다.
+
+```bash
+sudo ./scripts/configure_camera_source.sh \
+  --url http://172.30.1.10:8080/stream.mjpg --apply
+```
+
+휴대폰 영상만으로는 거리 척도와 로봇 자세를 확정할 수 없으므로, 이 모드는
+영상 입력·재질 분류·서버 연산의 사전 검증용입니다. 실제 주행용 점유 지도는
+로봇의 `/odom_raw`, `/tf_nav`, 거리 센서 `/scan`이 함께 들어온 뒤 생성합니다.
+
+로봇 없이 카메라 레이어 연산 전체를 시험하려면 이 스크립트를 compute
+컨테이너에서 실행합니다. 결과의 점유 지도와 자세는 합성 데이터이며 주행에
+사용하면 안 됩니다.
+
+```bash
+./scripts/run_phone_camera_layer_test.sh \
+  http://PHONE_IP:PORT/VIDEO_PATH
+```
+
+공간 전체를 걸으며 여러 프레임을 나중 정합용으로 보관할 때는 캡처 세션을
+시작하고 종료합니다. 기본값은 0.5초 간격이며, 흐리거나 거의 같은 프레임은
+제외하고 최대 1200장을 보관합니다.
+
+```bash
+./scripts/manage_phone_scene_capture.sh start \
+  http://PHONE_IP:PORT/VIDEO_PATH room-session
+./scripts/manage_phone_scene_capture.sh status
+./scripts/manage_phone_scene_capture.sh stop
+```
+
+결과는 `~/phone-captures/room-session`에 JPEG 프레임과 `manifest.json`으로
+저장됩니다. 휴대폰만 든 상태에서는 각 프레임의 지도 자세가 없으므로
+`navigation_safe`는 `false`입니다. LiDAR 지도에 정확히 겹치려면 내일 로봇
+주행과 영상을 동시에 기록해 `/odom_raw`·`/tf_nav`를 동기화하는 방식이 가장
+정확하며, 오늘 프레임은 시각 특징 또는 수동 기준점으로 후정합합니다.
+
+수집 종료 후에는 전체 구간과 실제 이동 구간의 연락판, 화질 및 프레임 간
+시각적 겹침 보고서를 생성할 수 있습니다.
+
+```bash
+python3 ./scripts/analyze_phone_scene_capture.py ~/phone-captures/room-session
+```
+
 ### 별도 Ubuntu 컴퓨터용 서버 이미지
 
 UTM 대신 별도 Ubuntu 22.04/24.04/26.04 컴퓨터를 서버로 쓰려면 배포 이미지를

@@ -30,6 +30,10 @@ def generate_launch_description():
     map_output = LaunchConfiguration("map_output")
     camera_url = LaunchConfiguration("camera_url")
     camera_guard_enabled = LaunchConfiguration("camera_guard_enabled")
+    visual_mapper_enabled = LaunchConfiguration("visual_mapper_enabled")
+    legacy_texture_mapper_enabled = LaunchConfiguration(
+        "legacy_texture_mapper_enabled"
+    )
     texture_source_top_fraction = LaunchConfiguration(
         "texture_source_top_fraction"
     )
@@ -37,6 +41,17 @@ def generate_launch_description():
     texture_far_m = LaunchConfiguration("texture_far_m")
     texture_near_width_m = LaunchConfiguration("texture_near_width_m")
     texture_far_width_m = LaunchConfiguration("texture_far_width_m")
+    camera_horizontal_fov_deg = LaunchConfiguration("camera_horizontal_fov_deg")
+    camera_vertical_fov_deg = LaunchConfiguration("camera_vertical_fov_deg")
+    camera_yaw_offset_deg = LaunchConfiguration("camera_yaw_offset_deg")
+    camera_pitch_down_deg = LaunchConfiguration("camera_pitch_down_deg")
+    camera_height_m = LaunchConfiguration("camera_height_m")
+    lidar_x_offset_m = LaunchConfiguration("lidar_x_offset_m")
+    lidar_y_offset_m = LaunchConfiguration("lidar_y_offset_m")
+    obstacle_layer_render_period = LaunchConfiguration(
+        "obstacle_layer_render_period"
+    )
+    sensor_sync_maximum_skew = LaunchConfiguration("sensor_sync_maximum_skew")
     mapping_maximum_runtime = LaunchConfiguration("mapping_maximum_runtime")
     mapping_maximum_radius = LaunchConfiguration("mapping_maximum_radius")
     # Frontier exploration cares about reaching the free cell, not finishing
@@ -70,6 +85,10 @@ def generate_launch_description():
                 default_value="http://127.0.0.1:8080/stream.mjpg",
             ),
             DeclareLaunchArgument("camera_guard_enabled", default_value="true"),
+            DeclareLaunchArgument("visual_mapper_enabled", default_value="false"),
+            DeclareLaunchArgument(
+                "legacy_texture_mapper_enabled", default_value="false"
+            ),
             DeclareLaunchArgument(
                 "texture_source_top_fraction", default_value="0.50"
             ),
@@ -80,6 +99,25 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "texture_far_width_m", default_value="1.8"
+            ),
+            DeclareLaunchArgument(
+                "camera_horizontal_fov_deg", default_value="68.0"
+            ),
+            DeclareLaunchArgument(
+                "camera_vertical_fov_deg", default_value="50.0"
+            ),
+            DeclareLaunchArgument("camera_yaw_offset_deg", default_value="0.0"),
+            DeclareLaunchArgument(
+                "camera_pitch_down_deg", default_value="18.0"
+            ),
+            DeclareLaunchArgument("camera_height_m", default_value="0.24"),
+            DeclareLaunchArgument("lidar_x_offset_m", default_value="-0.0046"),
+            DeclareLaunchArgument("lidar_y_offset_m", default_value="0.0"),
+            DeclareLaunchArgument(
+                "obstacle_layer_render_period", default_value="2.0"
+            ),
+            DeclareLaunchArgument(
+                "sensor_sync_maximum_skew", default_value="0.18"
             ),
             DeclareLaunchArgument(
                 "mapping_maximum_runtime", default_value="900.0"
@@ -127,6 +165,8 @@ def generate_launch_description():
                             "temporal_minimum_hits:=2",
                             "-p",
                             "temporal_tolerance:=0.15",
+                            "-p",
+                            "maximum_range_m:=4.0",
                         ],
                         output="screen",
                     ),
@@ -140,6 +180,31 @@ def generate_launch_description():
                         ],
                         output="screen",
                         condition=IfCondition(camera_guard_enabled),
+                    ),
+                    Node(
+                        package="orchard_mapper",
+                        executable="camera_bev_node",
+                        name="camera_bev",
+                        parameters=[
+                            "/opt/robot-control/orchard_ws/install/share/"
+                            "orchard_mapper/config/mapper.yaml",
+                            {"camera_url": camera_url},
+                        ],
+                        output="screen",
+                        condition=IfCondition(visual_mapper_enabled),
+                    ),
+                    Node(
+                        package="orchard_mapper",
+                        executable="global_visual_mapper",
+                        name="orchard_visual_mapper",
+                        parameters=[
+                            "/opt/robot-control/orchard_ws/install/share/"
+                            "orchard_mapper/config/mapper.yaml",
+                            {"use_sim_time": use_sim_time},
+                        ],
+                        remappings=[("/tf", "/tf_nav")],
+                        output="screen",
+                        condition=IfCondition(visual_mapper_enabled),
                     ),
                     ExecuteProcess(
                         cmd=[
@@ -190,6 +255,21 @@ def generate_launch_description():
                             {"node_names": ["map_saver"]},
                         ],
                         output="screen",
+                    ),
+                    Node(
+                        package="tf2_ros",
+                        executable="static_transform_publisher",
+                        name="base_footprint_to_base_link",
+                        arguments=[
+                            "0",
+                            "0",
+                            "0",
+                            "0",
+                            "0",
+                            "0",
+                            "base_footprint",
+                            "base_link",
+                        ],
                     ),
                     Node(
                         package="tf2_ros",
@@ -255,8 +335,41 @@ def generate_launch_description():
                                 "projection_source_top_fraction:=",
                                 texture_source_top_fraction,
                             ],
+                            "-p",
+                            ["map_output:=", map_output],
+                            "-p",
+                            [
+                                "camera_horizontal_fov_deg:=",
+                                camera_horizontal_fov_deg,
+                            ],
+                            "-p",
+                            [
+                                "camera_vertical_fov_deg:=",
+                                camera_vertical_fov_deg,
+                            ],
+                            "-p",
+                            ["camera_yaw_offset_deg:=", camera_yaw_offset_deg],
+                            "-p",
+                            ["camera_pitch_down_deg:=", camera_pitch_down_deg],
+                            "-p",
+                            ["camera_height_m:=", camera_height_m],
+                            "-p",
+                            ["lidar_x_offset_m:=", lidar_x_offset_m],
+                            "-p",
+                            ["lidar_y_offset_m:=", lidar_y_offset_m],
+                            "-p",
+                            [
+                                "live_render_period:=",
+                                obstacle_layer_render_period,
+                            ],
+                            "-p",
+                            [
+                                "maximum_sensor_skew:=",
+                                sensor_sync_maximum_skew,
+                            ],
                         ],
                         output="screen",
+                        condition=IfCondition(legacy_texture_mapper_enabled),
                     ),
                 ]
             ),

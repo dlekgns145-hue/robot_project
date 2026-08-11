@@ -1,14 +1,26 @@
 ARG BASE_IMAGE=ros:humble-ros-base-jammy
 FROM ${BASE_IMAGE}
 
+ARG ROS_APT_MIRROR=https://mirrors.aliyun.com/ros2/ubuntu
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN ros_source_files="$(grep -RIl 'packages\.ros\.org/ros2/ubuntu' \
+        /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)" \
+    && if [ -n "${ros_source_files}" ]; then \
+        sed -i -E \
+            "s#https?://packages\.ros\.org/ros2/ubuntu#${ROS_APT_MIRROR}#g" \
+            ${ros_source_files}; \
+    fi \
+    && apt-get -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         python3-opencv \
         python3-numpy \
+        python3-colcon-common-extensions \
+        ros-humble-cv-bridge \
+        ros-humble-message-filters \
         ros-humble-navigation2 \
         ros-humble-nav2-bringup \
         ros-humble-slam-toolbox \
@@ -30,6 +42,7 @@ COPY robot_docker/navigation_runtime_launch.py \
      robot_docker/autonomous_mapping.py \
      robot_docker/frontier_core.py \
      robot_docker/map_texture_core.py \
+     robot_docker/obstacle_texture_fusion.py \
      robot_docker/map_texture_recorder.py \
      robot_docker/calibrate_map_texture.py \
      robot_docker/camera_obstacle_guard.py \
@@ -39,6 +52,12 @@ COPY robot_docker/recovered/Broom.yaml \
      robot_docker/recovered/dwb_nav_params_fixed.yaml \
      robot_docker/mapping_slam_params.yaml \
      /opt/robot-control/navigation/
+
+COPY orchard_mapper /opt/robot-control/orchard_ws/src/orchard_mapper
+
+RUN . /opt/ros/humble/setup.sh \
+    && cd /opt/robot-control/orchard_ws \
+    && colcon build --merge-install --packages-select orchard_mapper
 
 RUN chmod 0755 /opt/robot-control/entrypoint.sh \
     /opt/robot-control/navigation/*.py \

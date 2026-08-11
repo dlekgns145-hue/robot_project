@@ -19,7 +19,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_msgs.msg import Bool, String
-from std_srvs.srv import SetBool, Trigger
+from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from frontier_core import GridSpec, frontier_candidates
@@ -34,8 +34,11 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("base_frame", "base_footprint")
         self.declare_parameter("decision_period", 1.0)
         self.declare_parameter("startup_delay", 8.0)
-        self.declare_parameter("goal_timeout", 35.0)
+        # Allow Nav2's progress checker and recovery tree to finish a bounded
+        # spin/backup cycle before the frontier goal is cancelled.
+        self.declare_parameter("goal_timeout", 75.0)
         self.declare_parameter("minimum_runtime", 60.0)
+        self.declare_parameter("minimum_completion_travel_distance", 1.0)
         self.declare_parameter("maximum_runtime", 1800.0)
         self.declare_parameter("completion_stable_maps", 5)
         self.declare_parameter("minimum_frontier_length", 0.35)
@@ -45,8 +48,8 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("frontier_goal_standoff", 0.10)
         self.declare_parameter("maximum_exploration_radius", 25.0)
         self.declare_parameter("blacklist_radius", 0.7)
-        self.declare_parameter("failed_goal_blacklist_seconds", 300.0)
-        self.declare_parameter("reached_goal_blacklist_seconds", 12.0)
+        self.declare_parameter("failed_goal_blacklist_seconds", 20.0)
+        self.declare_parameter("reached_goal_blacklist_seconds", 6.0)
         self.declare_parameter("map_output", "/opt/robot-control/maps/orchard_map")
 
         self.map_frame = str(self.get_parameter("map_frame").value)
@@ -71,8 +74,8 @@ class AutonomousMappingNode(Node):
         self.stop_publisher = self.create_publisher(Twist, "/cmd_vel", 10)
         self.navigator = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.map_saver = self.create_client(SaveMap, "/map_saver/save_map")
-        self.command_mode = self.create_client(
-            SetBool, "/cmd_bridge/navigation_mode"
+        self.navigation_lease_publisher = self.create_publisher(
+            Bool, "/cmd_bridge/navigation_lease", 10
         )
         self.emergency_subscription = self.create_subscription(
             Bool,
@@ -90,6 +93,7 @@ class AutonomousMappingNode(Node):
         self.timer = self.create_timer(
             float(self.get_parameter("decision_period").value), self._tick
         )
+        self.status_timer = self.create_timer(1.0, self._publish_periodic_status)
 
         self.latest_map: OccupancyGrid | None = None
         self.map_sequence = 0
@@ -105,12 +109,15 @@ class AutonomousMappingNode(Node):
         self.goal_sent_at = 0.0
         self.distance_remaining = None
         self.blacklist: list[tuple[float, float, float]] = []
+        self.travel_distance = 0.0
+        self.last_travel_pose: tuple[float, float] | None = None
         self.save_pending = False
         self.save_requested_reason = ""
         self.saving_map_output = ""
         self.saved_map = ""
         self.save_sequence = 0
-        self._publish_status("autonomous mapping ready; waiting for start")
+        self.status_message = "autonomous mapping ready; waiting for start"
+        self._publish_status(self.status_message)
 
     def _seconds(self) -> float:
         return self.get_clock().now().nanoseconds / 1_000_000_000.0
@@ -137,10 +144,6 @@ class AutonomousMappingNode(Node):
             response.success = False
             response.message = f"map transform is not ready: {error}"
             return response
-        if not self.command_mode.service_is_ready():
-            response.success = False
-            response.message = "command bridge navigation lock is unavailable"
-            return response
         self._set_navigation_mode(True)
         self.enabled = True
         self.state = "starting"
@@ -148,6 +151,8 @@ class AutonomousMappingNode(Node):
         self.empty_map_count = 0
         self.last_empty_map_sequence = -1
         self.blacklist.clear()
+        self.travel_distance = 0.0
+        self.last_travel_pose = self.start_pose
         self.saved_map = ""
         response.success = True
         response.message = "autonomous mapping started"
@@ -191,24 +196,17 @@ class AutonomousMappingNode(Node):
             self.stop_publisher.publish(stop)
 
     def _set_navigation_mode(self, enabled: bool) -> None:
-        if not self.command_mode.service_is_ready():
-            self.get_logger().error("command bridge navigation lock is unavailable")
-            return
-        request = SetBool.Request()
-        request.data = enabled
-        future = self.command_mode.call_async(request)
-        future.add_done_callback(self._on_navigation_mode_changed)
+        lease = Bool()
+        lease.data = enabled
+        for _ in range(3 if not enabled else 1):
+            self.navigation_lease_publisher.publish(lease)
 
-    def _on_navigation_mode_changed(self, future) -> None:
-        try:
-            response = future.result()
-        except Exception as error:
-            self.get_logger().error(f"navigation lock request failed: {error}")
-            return
-        if not response.success:
-            self.get_logger().error(
-                f"navigation lock request rejected: {response.message}"
-            )
+    def _record_travel(self, x: float, y: float) -> None:
+        if self.last_travel_pose is not None:
+            step = math.hypot(x - self.last_travel_pose[0], y - self.last_travel_pose[1])
+            if step <= 0.5:
+                self.travel_distance += step
+        self.last_travel_pose = (x, y)
 
     def _on_emergency_stop(self, message: Bool) -> None:
         if message.data and (self.enabled or self.goal_handle is not None):
@@ -293,6 +291,15 @@ class AutonomousMappingNode(Node):
             self._request_map_save("saving partial map after time limit")
             return
 
+        # Account for motion while an action goal is active. Previously travel
+        # was sampled only between goals, so a successful one-metre drive could
+        # appear as zero progress and block the completion guard forever.
+        try:
+            travel_x, travel_y = self._robot_pose()
+            self._record_travel(travel_x, travel_y)
+        except TransformException:
+            pass
+
         if self.goal_handle is not None:
             timeout = float(self.get_parameter("goal_timeout").value)
             if now - self.goal_sent_at >= timeout:
@@ -327,8 +334,15 @@ class AutonomousMappingNode(Node):
                 self.last_empty_map_sequence = self.map_sequence
             self.state = "checking_completion"
             minimum_runtime = float(self.get_parameter("minimum_runtime").value)
+            minimum_travel = float(
+                self.get_parameter("minimum_completion_travel_distance").value
+            )
             stable_maps = int(self.get_parameter("completion_stable_maps").value)
-            if elapsed >= minimum_runtime and self.empty_map_count >= stable_maps:
+            if (
+                elapsed >= minimum_runtime
+                and self.empty_map_count >= stable_maps
+                and self.travel_distance >= minimum_travel
+            ):
                 self.enabled = False
                 self.state = "completed"
                 self._publish_zero()
@@ -336,7 +350,10 @@ class AutonomousMappingNode(Node):
                 self._publish_status("exploration complete")
                 self._request_map_save("saving completed map")
             else:
-                self._publish_status("no usable frontier; checking completion")
+                self._publish_status(
+                    "no usable frontier; checking completion "
+                    f"(travel={self.travel_distance:.2f}/{minimum_travel:.2f} m)"
+                )
             return
 
         self.empty_map_count = 0
@@ -459,7 +476,13 @@ class AutonomousMappingNode(Node):
         else:
             self._publish_status("map saver reported failure")
 
-    def _publish_status(self, message: str) -> None:
+    def _publish_periodic_status(self) -> None:
+        if self.enabled:
+            self._set_navigation_mode(True)
+            self._publish_status(self.status_message, log=False)
+
+    def _publish_status(self, message: str, *, log: bool = True) -> None:
+        self.status_message = message
         payload = {
             "state": self.state,
             "enabled": self.enabled,
@@ -469,13 +492,15 @@ class AutonomousMappingNode(Node):
             "distance_remaining": self.distance_remaining,
             "saved_map": self.saved_map,
             "save_sequence": self.save_sequence,
+            "travel_distance": round(self.travel_distance, 3),
         }
         if self.goal_candidate is not None:
             payload["goal"] = asdict(self.goal_candidate)
         status = String()
         status.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         self.status_publisher.publish(status)
-        self.get_logger().info(message)
+        if log:
+            self.get_logger().info(message)
 
 
 def main() -> None:

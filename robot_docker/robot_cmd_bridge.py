@@ -53,6 +53,8 @@ COMMAND_TIMEOUT = 0.5
 SERVER_COMMAND_TIMEOUT = float(os.getenv("SERVER_COMMAND_TIMEOUT_SEC", "0.5"))
 SERVER_MAX_LINEAR_SPEED = float(os.getenv("SERVER_MAX_LINEAR_SPEED", "0.12"))
 SERVER_MAX_ANGULAR_SPEED = float(os.getenv("SERVER_MAX_ANGULAR_SPEED", "0.18"))
+SERVER_MIN_ANGULAR_SPEED = float(os.getenv("SERVER_MIN_ANGULAR_SPEED", "0.18"))
+NAVIGATION_LEASE_TIMEOUT = float(os.getenv("NAVIGATION_LEASE_TIMEOUT_SEC", "2.5"))
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
 LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
@@ -118,6 +120,8 @@ class CmdBridgeNode(Node):
         self.server_linear = 0.0
         self.server_angular = 0.0
         self.last_server_cmd_at = 0.0
+        self.last_navigation_lease_at = 0.0
+        self.navigation_lease_active = False
         self.navigator = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self._remote_nav_state = "idle"
         self._remote_nav_active = False
@@ -139,6 +143,7 @@ class CmdBridgeNode(Node):
 
         self.front_blocked = False
         self.front_min_dist = 10.0
+        self.rear_min_dist = 10.0
         self._last_scan_at = 0.0
         self.camera_front_min_dist = float("inf")
         self._last_camera_scan_at = 0.0
@@ -163,6 +168,9 @@ class CmdBridgeNode(Node):
         )
         self.create_subscription(
             Twist, "/cmd_vel_server", self.server_cmd_callback, 10
+        )
+        self.create_subscription(
+            Bool, "/cmd_bridge/navigation_lease", self.navigation_lease_callback, 10
         )
         self.create_subscription(
             PoseWithCovarianceStamped, "/amcl_pose", self._amcl_pose_callback, 10
@@ -335,6 +343,7 @@ class CmdBridgeNode(Node):
         side_max_rad = math.radians(SIDE_ANGLE_MAX_DEG)
 
         front_min_dist = float("inf")
+        rear_min_dist = float("inf")
         left_dists = []
         right_dists = []
 
@@ -345,6 +354,9 @@ class CmdBridgeNode(Node):
             if -front_range_rad <= angle <= front_range_rad:
                 if r < front_min_dist:
                     front_min_dist = r
+            if abs(angle) >= math.radians(150.0):
+                if r < rear_min_dist:
+                    rear_min_dist = r
             if side_min_rad <= angle <= side_max_rad:
                 right_dists.append(r)
             if -side_max_rad <= angle <= -side_min_rad:
@@ -352,6 +364,7 @@ class CmdBridgeNode(Node):
 
         self.front_blocked = front_min_dist < OBSTACLE_STOP_DISTANCE_M
         self.front_min_dist = front_min_dist
+        self.rear_min_dist = rear_min_dist
 
         if left_dists:
             self.left_history.append(sum(left_dists) / len(left_dists))
@@ -383,6 +396,8 @@ class CmdBridgeNode(Node):
         if not math.isfinite(linear) or not math.isfinite(angular):
             self.get_logger().error("서버 속도 명령에 NaN/Inf가 있어 폐기함")
             return
+        if 0.0 < abs(angular) < SERVER_MIN_ANGULAR_SPEED:
+            angular = math.copysign(SERVER_MIN_ANGULAR_SPEED, angular)
         with self.lock:
             if not self.navigation_mode:
                 return
@@ -394,6 +409,23 @@ class CmdBridgeNode(Node):
                 min(SERVER_MAX_ANGULAR_SPEED, angular),
             )
             self.last_server_cmd_at = time.monotonic()
+
+    def navigation_lease_callback(self, message: Bool):
+        """Own motors while the compute mapper renews a short-lived lease."""
+
+        if not bool(message.data):
+            with self.lock:
+                lease_active = self.navigation_lease_active
+            if lease_active:
+                self._set_navigation_control(False)
+            return
+        now = time.monotonic()
+        with self.lock:
+            already_enabled = self.navigation_mode
+            self.last_navigation_lease_at = now
+            self.navigation_lease_active = True
+        if not already_enabled:
+            self._set_navigation_control(True, lease_active=True, lease_time=now)
 
     def _get_smoothed_left(self):
         return (
@@ -466,6 +498,12 @@ class CmdBridgeNode(Node):
         twist = Twist()
         with self.lock:
             navigation_mode = self.navigation_mode
+            lease_active = self.navigation_lease_active
+            lease_age = time.monotonic() - self.last_navigation_lease_at
+        if navigation_mode and lease_active and lease_age > NAVIGATION_LEASE_TIMEOUT:
+            self.get_logger().error("navigation lease expired; stopping robot")
+            self._set_navigation_control(False)
+            return
         if navigation_mode:
             self._server_navigation_control_loop(twist)
             return
@@ -605,6 +643,8 @@ class CmdBridgeNode(Node):
             OBSTACLE_STOP_DISTANCE_M, CAMERA_STOP_DISTANCE_M
         ):
             linear = 0.0
+        if linear < 0.0 and self.rear_min_dist < OBSTACLE_STOP_DISTANCE_M:
+            linear = 0.0
         twist.linear.x = linear
         twist.angular.z = angular
         self.pub.publish(twist)
@@ -621,9 +661,13 @@ class CmdBridgeNode(Node):
         self.get_logger().info(response.message)
         return response
 
-    def _set_navigation_control(self, enabled: bool):
+    def _set_navigation_control(
+        self, enabled: bool, *, lease_active: bool = False, lease_time: float = 0.0
+    ):
         with self.lock:
             self.navigation_mode = enabled
+            self.navigation_lease_active = bool(enabled and lease_active)
+            self.last_navigation_lease_at = lease_time if enabled else 0.0
             self.desired_linear = 0.0
             self.desired_angular = 0.0
             self.last_cmd_time = 0.0

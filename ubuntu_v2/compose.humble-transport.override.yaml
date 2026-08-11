@@ -1,0 +1,5 @@
+services:
+  ros-transport:
+    ipc: host
+    environment:
+      ROS_DISTRO: humble

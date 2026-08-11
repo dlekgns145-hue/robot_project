@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSettings, QTimer, Qt
@@ -67,6 +68,9 @@ class MainWindow(QMainWindow):
         self._last_saved_map = ""
         self._last_mapping_result: tuple[str, bool, str] | None = None
         self._map_requested_for_ip = ""
+        self._last_live_map_sequence = -1
+        self._last_live_map_request_at = 0.0
+        self._last_map_payload_source = ""
         self._manual_keys: set[int] = set()
         self._build_ui()
         self._load_settings()
@@ -900,10 +904,20 @@ class MainWindow(QMainWindow):
             height = int(payload["height"])
             resolution = float(payload["resolution"])
             texture_note = " · 카메라 오버레이" if self.map_view.has_texture else ""
+            map_source = str(payload.get("map_source") or "saved")
+            source_note = "실시간" if map_source == "live" else "저장됨"
             self.map_summary_label.setText(
-                f"{width * resolution:.2f} × {height * resolution:.2f} m{texture_note}"
+                f"{source_note} · {width * resolution:.2f} × "
+                f"{height * resolution:.2f} m{texture_note}"
             )
-            self.append_log("로봇에서 저장 지도를 불러왔습니다")
+            if map_source != self._last_map_payload_source:
+                message = (
+                    "실시간 LiDAR·카메라 지도를 표시합니다"
+                    if map_source == "live"
+                    else "로봇에서 저장 지도를 불러왔습니다"
+                )
+                self.append_log(message)
+                self._last_map_payload_source = map_source
         except (KeyError, TypeError, ValueError) as error:
             self._map_requested_for_ip = ""
             self.append_log(f"지도 표시 실패: {error}")
@@ -936,6 +950,7 @@ class MainWindow(QMainWindow):
             "earth_or_wood": "흙·목재 계열",
             "stone_or_concrete": "석재·콘크리트 계열",
             "reflective_or_synthetic": "반사·합성 소재",
+            "ambiguous_neutral": "중성색 소재(확인 필요)",
             "other": "기타",
         }
         details = " · ".join(
@@ -991,7 +1006,20 @@ class MainWindow(QMainWindow):
         distance = mapping.get("distance_remaining")
         details = []
         if map_sequence is not None:
-            details.append(f"지도 갱신 {int(map_sequence)}회")
+            sequence = int(map_sequence)
+            details.append(f"지도 갱신 {sequence}회")
+            if self._mapping_active and sequence != self._last_live_map_sequence:
+                self._last_live_map_sequence = sequence
+                now = time.monotonic()
+                if (
+                    self.client is not None
+                    and self.robot_connected
+                    and now - self._last_live_map_request_at >= 1.8
+                ):
+                    self._last_live_map_request_at = now
+                    self.client.request_map()
+        if not self._mapping_active:
+            self._last_live_map_sequence = -1
         if distance is not None:
             details.append(f"목표까지 {float(distance):.2f} m")
         suffix = f" · {' · '.join(details)}" if details else ""

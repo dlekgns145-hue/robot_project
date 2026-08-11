@@ -5,6 +5,10 @@ set -eo pipefail
 
 source /opt/ros/humble/setup.bash
 
+if [[ -f /opt/robot-control/orchard_ws/install/setup.bash ]]; then
+    source /opt/robot-control/orchard_ws/install/setup.bash
+fi
+
 # Yahboom image revisions use both workspace names. Source every workspace that
 # exists so the official bringup package and its scan/odom relay nodes are
 # available regardless of the image layout.
@@ -41,18 +45,30 @@ case "${1:-}" in
         ;;
     mapping|mapping-server)
         camera_guard_enabled="${ROBOT_CAMERA_GUARD_ENABLED:-true}"
+        visual_mapper_enabled="false"
         if [[ "${1}" == "mapping-server" ]]; then
             camera_guard_enabled="false"
+            visual_mapper_enabled="true"
         fi
         exec ros2 launch /opt/robot-control/navigation/mapping_runtime_launch.py \
             map_output:="${ROBOT_MAP_OUTPUT:-/opt/robot-control/maps/orchard_map}" \
             camera_url:="${ROBOT_CAMERA_URL:-http://127.0.0.1:8080/stream.mjpg}" \
             camera_guard_enabled:="${camera_guard_enabled}" \
+            visual_mapper_enabled:="${visual_mapper_enabled}" \
             texture_source_top_fraction:="${ROBOT_TEXTURE_SOURCE_TOP_FRACTION:-0.50}" \
             texture_near_m:="${ROBOT_TEXTURE_NEAR_M:-0.18}" \
             texture_far_m:="${ROBOT_TEXTURE_FAR_M:-2.0}" \
             texture_near_width_m:="${ROBOT_TEXTURE_NEAR_WIDTH_M:-0.85}" \
             texture_far_width_m:="${ROBOT_TEXTURE_FAR_WIDTH_M:-1.8}" \
+            camera_horizontal_fov_deg:="${ROBOT_CAMERA_HORIZONTAL_FOV_DEG:-68.0}" \
+            camera_vertical_fov_deg:="${ROBOT_CAMERA_VERTICAL_FOV_DEG:-50.0}" \
+            camera_yaw_offset_deg:="${ROBOT_CAMERA_YAW_OFFSET_DEG:-0.0}" \
+            camera_pitch_down_deg:="${ROBOT_CAMERA_PITCH_DOWN_DEG:-18.0}" \
+            camera_height_m:="${ROBOT_CAMERA_HEIGHT_M:-0.24}" \
+            lidar_x_offset_m:="${ROBOT_LIDAR_X_OFFSET_M:--0.0046}" \
+            lidar_y_offset_m:="${ROBOT_LIDAR_Y_OFFSET_M:-0.0}" \
+            obstacle_layer_render_period:="${ROBOT_OBSTACLE_LAYER_RENDER_PERIOD:-2.0}" \
+            sensor_sync_maximum_skew:="${ROBOT_SENSOR_SYNC_MAXIMUM_SKEW:-0.18}" \
             mapping_maximum_runtime:="${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}" \
             mapping_maximum_radius:="${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}"
         ;;

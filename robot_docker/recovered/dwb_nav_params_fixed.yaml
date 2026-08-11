@@ -161,12 +161,13 @@ controller_server:
       # The dedicated BackUp recovery behavior remains available separately.
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.12
+      max_vel_x: 0.08
       max_vel_y: 0.0
       max_vel_theta: 0.18
       min_speed_xy: 0.02
       max_speed_xy: 0.12
-      min_speed_theta: 0.04
+      # The physical base does not move below roughly 0.18 rad/s.
+      min_speed_theta: 0.18
       # Add high threshold velocity for turtlebot 3 issue.
       # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
       acc_lim_x: 0.3
@@ -348,7 +349,7 @@ behavior_server:
     use_sim_time: False
     simulate_ahead_time: 2.0
     max_rotational_vel: 0.18
-    min_rotational_vel: 0.05
+    min_rotational_vel: 0.18
     rotational_acc_lim: 0.5
 
 robot_state_publisher:
@@ -372,8 +373,8 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.12, 0.0, 0.18]
-    min_velocity: [-0.08, 0.0, -0.18]
+    max_velocity: [0.08, 0.0, 0.18]
+    min_velocity: [-0.06, 0.0, -0.18]
     max_accel: [0.3, 0.0, 0.5]
     max_decel: [-0.3, 0.0, -0.5]
     odom_topic: "/odom_nav"

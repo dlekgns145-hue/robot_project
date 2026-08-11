@@ -89,6 +89,19 @@ class NavigationRecoveryTests(unittest.TestCase):
             self.scan_filter.is_self_reflection(math.radians(-150.0), 0.5)
         )
 
+    def test_slam_range_cap_removes_distant_reflection(self) -> None:
+        filtered = self.scan_filter.sanitize_ranges(
+            [1.0, 4.1],
+            angle_min=0.0,
+            angle_increment=0.1,
+            range_min=0.12,
+            range_max=8.0,
+            maximum_range_m=4.0,
+        )
+
+        self.assertAlmostEqual(filtered[0], 1.0)
+        self.assertTrue(math.isinf(filtered[1]))
+
     def test_slam_spatial_filter_removes_only_isolated_return(self) -> None:
         filtered = self.scan_filter.remove_spatial_speckles(
             [math.inf, 1.0, math.inf, 2.0, 2.03, math.inf],
@@ -155,11 +168,18 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn('("/tf", "/tf_nav")', launch_text)
         self.assertIn("scan_time_fix.py", launch_text)
         self.assertIn("odom_relay.py", launch_text)
+        self.assertIn('name="base_footprint_to_base_link"', launch_text)
         self.assertIn("navigation_launch.py", launch_text)
         self.assertIn("autonomous_mapping.py", launch_text)
         self.assertIn("map_texture_recorder.py", launch_text)
         self.assertIn("map_texture_core.py", dockerfile_text)
+        self.assertIn("obstacle_texture_fusion.py", dockerfile_text)
         self.assertIn("calibrate_map_texture.py", dockerfile_text)
+        self.assertIn('LaunchConfiguration("camera_horizontal_fov_deg")', launch_text)
+        self.assertIn('"obstacle_layer_render_period"', launch_text)
+        self.assertIn('"sensor_sync_maximum_skew"', launch_text)
+        self.assertIn("lidar_x_offset_m:=", launch_text)
+        self.assertIn("ROBOT_SENSOR_SYNC_MAXIMUM_SKEW", entrypoint_text)
         self.assertIn('LaunchConfiguration("texture_far_m")', launch_text)
         self.assertIn("projection_far_width_m:=", launch_text)
         odom_command = launch_text.split('f"{runtime_dir}/odom_relay.py"', 1)[1]
@@ -181,6 +201,7 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("IfCondition(camera_guard_enabled)", launch_text)
         self.assertIn("output_topic:=/scan_slam", launch_text)
         self.assertIn("temporal_window:=3", launch_text)
+        self.assertIn("maximum_range_m:=4.0", launch_text)
         self.assertIn("RewrittenYaml", launch_text)
         self.assertIn('{"yaw_goal_tolerance": "3.14"}', launch_text)
         self.assertIn('default_value="false"', launch_text)
@@ -190,6 +211,8 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("observation_sources: scan camera", nav_params_text)
         self.assertIn("topic: /camera_scan", nav_params_text)
         self.assertIn("default_server_timeout: 1000", nav_params_text)
+        self.assertIn("min_speed_theta: 0.18", nav_params_text)
+        self.assertIn("throttle_scans: 1", params_text)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"

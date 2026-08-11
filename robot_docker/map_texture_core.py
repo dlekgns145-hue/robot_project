@@ -218,16 +218,18 @@ def _material_summary(camera_bgr: np.ndarray, obstacle_mask: np.ndarray) -> dict
         "earth_or_wood": 0,
         "stone_or_concrete": 0,
         "reflective_or_synthetic": 0,
+        "ambiguous_neutral": 0,
         "other": 0,
     }
     observed_pixels = int(np.count_nonzero(obstacle_mask))
     if observed_pixels == 0:
         return {
-            "method": "camera-color-heuristic-v1",
+            "method": "camera-color-heuristic-v2",
             "observed_pixels": 0,
             "counts": counts,
             "dominant": "unknown",
             "dominant_share": 0.0,
+            "confidence": "low",
         }
 
     hsv = cv2.cvtColor(camera_bgr, cv2.COLOR_BGR2HSV)
@@ -260,6 +262,18 @@ def _material_summary(camera_bgr: np.ndarray, obstacle_mask: np.ndarray) -> dict
     counts["reflective_or_synthetic"] = int(np.count_nonzero(reflective))
     unclassified &= ~reflective
 
+    # Very low-saturation pixels cannot reliably separate pale timber, painted
+    # metal, concrete, and stone using color alone.  Keep them visibly textured
+    # but label them as ambiguous instead of making a confident concrete claim.
+    neutral = (
+        unclassified
+        & (saturation < 25)
+        & (value >= 35)
+        & (value <= 215)
+    )
+    counts["ambiguous_neutral"] = int(np.count_nonzero(neutral))
+    unclassified &= ~neutral
+
     stone = unclassified & (saturation < 55) & (value >= 35) & (value <= 215)
     counts["stone_or_concrete"] = int(np.count_nonzero(stone))
     unclassified &= ~stone
@@ -267,13 +281,31 @@ def _material_summary(camera_bgr: np.ndarray, obstacle_mask: np.ndarray) -> dict
 
     dominant = max(counts, key=counts.get)
     dominant_share = counts[dominant] / observed_pixels
+    if dominant_share >= 0.7:
+        confidence = "high"
+    elif dominant_share >= 0.5:
+        confidence = "medium"
+    else:
+        confidence = "low"
     return {
-        "method": "camera-color-heuristic-v1",
+        "method": "camera-color-heuristic-v2",
         "observed_pixels": observed_pixels,
         "counts": counts,
-        "dominant": dominant if dominant_share >= 0.35 else "mixed",
+        "dominant": dominant if dominant_share >= 0.5 else "mixed",
         "dominant_share": round(dominant_share, 4),
+        "confidence": confidence,
     }
+
+
+def summarize_obstacle_materials(
+    camera_bgr: np.ndarray, obstacle_mask: np.ndarray
+) -> dict:
+    """Public visual-only material summary for LiDAR-confirmed obstacle cells."""
+    if camera_bgr.ndim != 3 or camera_bgr.shape[2] != 3:
+        raise ValueError("camera obstacle image must be BGR")
+    if obstacle_mask.shape != camera_bgr.shape[:2]:
+        raise ValueError("obstacle mask dimensions do not match camera image")
+    return _material_summary(camera_bgr, obstacle_mask.astype(bool, copy=False))
 
 
 def compose_visual_layers(
@@ -327,14 +359,21 @@ def compose_visual_layers(
     return base, obstacle_layer, materials
 
 
-def save_texture_atomic(path: str, image: np.ndarray) -> None:
-    ok, encoded = cv2.imencode(".png", image)
+def save_image_atomic(path: str, image: np.ndarray, *, extension: str | None = None) -> None:
+    image_extension = extension or os.path.splitext(path)[1] or ".png"
+    if image_extension.lower() not in {".png", ".pgm", ".jpg", ".jpeg"}:
+        raise ValueError(f"unsupported map image extension: {image_extension}")
+    ok, encoded = cv2.imencode(image_extension, image)
     if not ok:
-        raise RuntimeError("camera texture PNG encoding failed")
+        raise RuntimeError(f"map image encoding failed: {image_extension}")
     temporary = f"{path}.tmp"
     with open(temporary, "wb") as output_file:
         output_file.write(encoded.tobytes())
     os.replace(temporary, path)
+
+
+def save_texture_atomic(path: str, image: np.ndarray) -> None:
+    save_image_atomic(path, image, extension=".png")
 
 
 def save_json_atomic(path: str, payload: dict) -> None:

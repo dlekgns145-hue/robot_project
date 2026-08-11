@@ -16,13 +16,16 @@ install -d "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/docker" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/robot_app" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/systemd" \
-    "${STAGING_DIR}/${IMAGE_NAME}/robot_docker"
+    "${STAGING_DIR}/${IMAGE_NAME}/robot_docker" \
+    "${STAGING_DIR}/${IMAGE_NAME}/orchard_mapper"
 cp -a "${PROJECT_DIR}/server_image/INSTALL_SERVER.sh" \
     "${STAGING_DIR}/${IMAGE_NAME}/INSTALL_SERVER.sh"
 cp -a "${PROJECT_DIR}/server_image/UNINSTALL_SERVER.sh" \
     "${STAGING_DIR}/${IMAGE_NAME}/UNINSTALL_SERVER.sh"
 cp -a "${PROJECT_DIR}/server_image/README.md" \
     "${STAGING_DIR}/${IMAGE_NAME}/README.md"
+cp -a "${PROJECT_DIR}/orchard_mapper/." \
+    "${STAGING_DIR}/${IMAGE_NAME}/orchard_mapper/"
 cp -a "${PROJECT_DIR}/ubuntu_v2/docker/." \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/docker/"
 cp -a \
@@ -32,11 +35,20 @@ cp -a \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/map_payload.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/robot_gateway.py" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/robot_app/"
-cp -a "${PROJECT_DIR}/ubuntu_v2/scripts/run_compute_mapping.sh" \
+cp -a \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/run_compute_mapping.sh" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/check_server_environment.sh" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/configure_camera_source.sh" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/phone_camera_layer_test.py" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/run_phone_camera_layer_test.sh" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/phone_scene_capture.py" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/manage_phone_scene_capture.sh" \
+    "${PROJECT_DIR}/ubuntu_v2/scripts/analyze_phone_scene_capture.py" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts/"
 cp -a "${PROJECT_DIR}/ubuntu_v2/systemd/robot-control-server.service" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/systemd/"
 cp -a "${PROJECT_DIR}/ubuntu_v2/compose.yaml" \
+    "${PROJECT_DIR}/ubuntu_v2/compose.humble-transport.override.yaml" \
     "${PROJECT_DIR}/ubuntu_v2/.env.example" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/"
 install -d "${STAGING_DIR}/${IMAGE_NAME}/robot_docker/recovered"
@@ -56,6 +68,7 @@ cp -a \
     "${PROJECT_DIR}/robot_docker/autonomous_mapping.py" \
     "${PROJECT_DIR}/robot_docker/frontier_core.py" \
     "${PROJECT_DIR}/robot_docker/map_texture_core.py" \
+    "${PROJECT_DIR}/robot_docker/obstacle_texture_fusion.py" \
     "${PROJECT_DIR}/robot_docker/map_texture_recorder.py" \
     "${PROJECT_DIR}/robot_docker/calibrate_map_texture.py" \
     "${PROJECT_DIR}/robot_docker/camera_obstacle_guard.py" \
@@ -74,7 +87,9 @@ if [[ -f "${PROJECT_DIR}/images/robot-control-server-images.tar" ]]; then
         "${STAGING_DIR}/${IMAGE_NAME}/images/"
 fi
 chmod 0755 "${STAGING_DIR}/${IMAGE_NAME}/INSTALL_SERVER.sh" \
-    "${STAGING_DIR}/${IMAGE_NAME}/UNINSTALL_SERVER.sh"
+    "${STAGING_DIR}/${IMAGE_NAME}/UNINSTALL_SERVER.sh" \
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts/"*.sh \
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts/"*.py
 
 install -d "${OUTPUT_DIR}"
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata \

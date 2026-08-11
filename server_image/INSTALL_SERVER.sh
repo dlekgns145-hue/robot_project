@@ -133,7 +133,8 @@ if ! systemctl is-active --quiet docker.service; then
 fi
 
 echo "Installing server application into ${INSTALL_DIR}..."
-install -d "${INSTALL_DIR}/ubuntu_v2" "${INSTALL_DIR}/robot_docker"
+install -d "${INSTALL_DIR}/ubuntu_v2" "${INSTALL_DIR}/robot_docker" \
+    "${INSTALL_DIR}/orchard_mapper"
 
 # Preserve generated maps, the operations database, and the active .env when
 # the installer is run again. Application files are refreshed in place.
@@ -143,6 +144,7 @@ cp -a "${SOURCE_DIR}/ubuntu_v2/scripts" "${INSTALL_DIR}/ubuntu_v2/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/systemd" "${INSTALL_DIR}/ubuntu_v2/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/compose.yaml" "${INSTALL_DIR}/ubuntu_v2/compose.yaml"
 cp -a "${SOURCE_DIR}/ubuntu_v2/.env.example" "${INSTALL_DIR}/ubuntu_v2/.env.example"
+cp -a "${SOURCE_DIR}/orchard_mapper/." "${INSTALL_DIR}/orchard_mapper/"
 install -d "${INSTALL_DIR}/robot_docker/recovered"
 cp -a \
     "${SOURCE_DIR}/robot_docker/entrypoint.sh" \
@@ -160,6 +162,7 @@ cp -a \
     "${SOURCE_DIR}/robot_docker/autonomous_mapping.py" \
     "${SOURCE_DIR}/robot_docker/frontier_core.py" \
     "${SOURCE_DIR}/robot_docker/map_texture_core.py" \
+    "${SOURCE_DIR}/robot_docker/obstacle_texture_fusion.py" \
     "${SOURCE_DIR}/robot_docker/map_texture_recorder.py" \
     "${SOURCE_DIR}/robot_docker/calibrate_map_texture.py" \
     "${SOURCE_DIR}/robot_docker/camera_obstacle_guard.py" \
@@ -231,7 +234,8 @@ install -m 0644 \
     "${INSTALL_DIR}/ubuntu_v2/systemd/robot-control-server.service" \
     /etc/systemd/system/robot-control-server.service
 systemctl daemon-reload
-systemctl enable --now robot-control-server.service
+systemctl enable robot-control-server.service
+systemctl restart robot-control-server.service
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 9999/tcp

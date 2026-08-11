@@ -109,6 +109,25 @@ class MapTextureCoreTests(unittest.TestCase):
         self.assertEqual(materials["dominant"], "vegetation")
         self.assertGreater(materials["counts"]["vegetation"], 10)
 
+    def test_neutral_obstacle_is_not_overclaimed_as_concrete(self) -> None:
+        occupancy = np.full((100, 100), 254, dtype=np.uint8)
+        occupancy[70:82, 23:29] = 0
+
+        _texture, _obstacle_layer, materials = compose_visual_layers(
+            occupancy,
+            self.info,
+            [self._sample((150, 150, 150))],
+            near_m=0.2,
+            far_m=1.5,
+            near_width_m=0.8,
+            far_width_m=1.6,
+            source_top_fraction=0.45,
+        )
+
+        self.assertEqual(materials["dominant"], "ambiguous_neutral")
+        self.assertGreater(materials["counts"]["ambiguous_neutral"], 10)
+        self.assertEqual(materials["counts"]["stone_or_concrete"], 0)
+
     def test_saved_map_metadata_is_loaded_and_validated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "orchard_map"

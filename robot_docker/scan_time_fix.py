@@ -39,6 +39,7 @@ def sanitize_ranges(
     angle_increment: float,
     range_min: float,
     range_max: float,
+    maximum_range_m: float = 0.0,
 ) -> list[float]:
     """Reject invalid ranges and the measured rear chassis reflection."""
 
@@ -46,10 +47,13 @@ def sanitize_ranges(
     for index, raw_distance in enumerate(ranges):
         distance = float(raw_distance)
         angle = angle_min + index * angle_increment
+        effective_maximum = (
+            min(range_max, maximum_range_m) if maximum_range_m > 0.0 else range_max
+        )
         if (
             not math.isfinite(distance)
             or distance < range_min
-            or distance > range_max
+            or distance > effective_maximum
             or is_self_reflection(angle, distance)
         ):
             cleaned.append(math.inf)
@@ -149,6 +153,7 @@ class ScanTimeFixNode(Node):
         self.declare_parameter("temporal_window", 1)
         self.declare_parameter("temporal_minimum_hits", 1)
         self.declare_parameter("temporal_tolerance", 0.15)
+        self.declare_parameter("maximum_range_m", 0.0)
         self.input_topic = str(self.get_parameter("input_topic").value)
         self.output_topic = str(self.get_parameter("output_topic").value)
         self.max_publish_hz = float(self.get_parameter("max_publish_hz").value)
@@ -163,6 +168,7 @@ class ScanTimeFixNode(Node):
             int(self.get_parameter("temporal_minimum_hits").value),
             float(self.get_parameter("temporal_tolerance").value),
         )
+        self.maximum_range_m = float(self.get_parameter("maximum_range_m").value)
         self._last_publish_nanoseconds = 0
         self.publisher = self.create_publisher(LaserScan, self.output_topic, 10)
         self.subscription = self.create_subscription(
@@ -176,7 +182,8 @@ class ScanTimeFixNode(Node):
             f"max_publish_hz={self.max_publish_hz:.1f}; "
             f"spatial_radius={self.spatial_filter_radius}; "
             f"temporal={self.temporal_filter.minimum_hits}/"
-            f"{self.temporal_filter.window}"
+            f"{self.temporal_filter.window}; maximum_range_m="
+            f"{self.maximum_range_m:.2f}"
         )
 
     def callback(self, message: LaserScan) -> None:
@@ -192,6 +199,7 @@ class ScanTimeFixNode(Node):
             angle_increment=float(message.angle_increment),
             range_min=float(message.range_min),
             range_max=float(message.range_max),
+            maximum_range_m=self.maximum_range_m,
         )
         ranges = remove_spatial_speckles(
             ranges,

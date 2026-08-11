@@ -4,8 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends arp-scan iproute2 iputils-ping \
+RUN apt-get -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends arp-scan iproute2 iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/robot-control-v2
