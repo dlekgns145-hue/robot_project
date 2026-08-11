@@ -70,9 +70,7 @@ fi
 
 section "configured endpoints"
 robot_ip="$(container_env robot-v2-gateway ROBOT_IP)"
-camera_url="$(container_env robot-v2-compute-mapping ROBOT_CAMERA_URL)"
 printf 'robot IP:  %s\n' "${robot_ip:-not configured}"
-printf 'camera:    %s\n' "${camera_url:-not configured}"
 if [[ -n "${robot_ip}" ]]; then
     printf 'route:     '
     ip route get "${robot_ip}" 2>&1 | head -n 1
@@ -82,7 +80,7 @@ section "sensor readiness"
 if docker ps --format '{{.Names}}' | grep -qx robot-v2-compute-mapping; then
     topics="$(docker exec robot-v2-compute-mapping bash -lc \
         'source /opt/ros/humble/setup.bash && ros2 topic list' 2>/dev/null || true)"
-    for topic in /scan /odom_raw /tf_nav /camera_scan; do
+    for topic in /scan /odom_raw /tf_nav /map; do
         if grep -qx "${topic}" <<<"${topics}"; then
             printf 'SEEN %-28s topic exists (confirm live rate with robot on)\n' "${topic}"
         else
@@ -99,4 +97,4 @@ if (( failures > 0 )); then
     exit 1
 fi
 printf 'PRECHECK OK: boot services and compute containers are ready.\n'
-printf 'Sensor WAIT lines are expected while the robot or camera is off.\n'
+printf 'Sensor WAIT lines are expected while the robot is off.\n'

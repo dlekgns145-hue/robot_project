@@ -110,7 +110,7 @@ planner/controller를 포함한 Nav2 bringup이 먼저 실행 중이어야 합�
 | STEP | 내용 | 관련 파일 | 상태 |
 |---|---|---|---|
 | 1 | 속도 조절 | `follow_person.py`의 `linear_speed` 파라미터 | 파라미터화 완료, 실측 필요 |
-| 2 | SLAM 지도 생성 | `slam/` 폴더 (map_saver로 저장) | 코드 아님 - 실습으로 진행 |
+| 2 | SLAM 지도 생성 | `robot_docker/autonomous_mapping.py`, `ubuntu_v2` | 프런티어 자율탐색·품질검증·안전저장 구현, 장시간 현장검증 필요 |
 | 3 | Navigation | `navigation/nav.py` | 골격만 (우선순위 낮음) |
 | 4 | 카메라 실행 | `perception/detect.py`의 이미지 구독부 | 구현됨 |
 | 5 | 사람 인식 | `perception/detect.py` (YOLO, 확정) | **완료** |
@@ -120,6 +120,16 @@ planner/controller를 포함한 Nav2 bringup이 먼저 실행 중이어야 합�
 | 9 | 장애물 회피 | 미구현 - `/scan` 구독 노드 추가 필요 | 다음 작업 |
 | 10 | SLAM+YOLO 통합 | 미구현 | 다음 작업 |
 | 11 | 성능 개선 | - | 마지막 |
+
+## 지도 생성 원칙
+
+운영 지도는 `/scan`과 오도메트리/TF만 사용하는 LiDAR SLAM 결과입니다. 저장
+형식은 Nav2 표준 `orchard_map.pgm`과 `orchard_map.yaml`이며, 카메라 이미지나
+텍스처·재질 레이어는 지도 생성·저장·전송에 참여하지 않습니다.
+
+향후 카카오 지도 연동은 LiDAR 점유 지도를 먼저 완성한 다음, 별도의 기준 위치와
+방향을 이용해 지도 좌표를 위·경도로 변환하고 카카오 지도 위에 표시하는 단계로
+분리합니다. 카카오 배경은 SLAM 점유 셀이나 자율주행 판단을 변경하지 않습니다.
 
 ## 다음에 할 일 (우선순위 순)
 

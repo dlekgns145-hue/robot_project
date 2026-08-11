@@ -245,6 +245,18 @@ class CommandLeaseTests(unittest.TestCase):
 
         self.assertEqual(node.pub.messages[0].linear.x, 0.0)
 
+    def test_measured_rear_housing_reflection_is_ignored(self) -> None:
+        self.assertTrue(
+            self.bridge.is_rear_housing_reflection(
+                self.bridge.math.radians(-168.0), 0.12
+            )
+        )
+        self.assertFalse(
+            self.bridge.is_rear_housing_reflection(
+                self.bridge.math.radians(-168.0), 0.50
+            )
+        )
+
     def test_heartbeat_does_not_become_a_motor_command(self) -> None:
         commands = []
         node = types.SimpleNamespace(
@@ -300,7 +312,7 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertTrue(response["command_result"]["ok"])
         self.assertTrue(response["mapping"]["enabled"])
 
-    def test_map_payload_includes_fresh_obstacle_material_layers(self) -> None:
+    def test_map_payload_ignores_visual_layer_files(self) -> None:
         node = object.__new__(self.bridge.CmdBridgeNode)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -329,17 +341,14 @@ class CommandLeaseTests(unittest.TestCase):
             with patch.multiple(
                 self.bridge,
                 MAP_DIRECTORY=str(root),
-                MAP_TEXTURE_PATH=str(texture_path),
-                MAP_OBSTACLE_TEXTURE_PATH=str(obstacle_path),
-                MAP_MATERIALS_PATH=str(materials_path),
             ):
                 payload = node.load_map_payload()
 
-            self.assertEqual(
-                base64.b64decode(payload["obstacle_texture_base64"]),
-                b"obstacle-png",
-            )
-            self.assertEqual(payload["obstacle_materials"], materials)
+            self.assertEqual(payload["occupancy_source"], "lidar_slam_only")
+            self.assertTrue(payload["navigation_safe"])
+            self.assertNotIn("texture_base64", payload)
+            self.assertNotIn("obstacle_texture_base64", payload)
+            self.assertNotIn("obstacle_materials", payload)
 
 
 if __name__ == "__main__":

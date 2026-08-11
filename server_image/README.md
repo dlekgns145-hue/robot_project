@@ -10,7 +10,7 @@ sudo ./INSTALL_SERVER.sh
 ```
 
 설치 프로그램은 Docker Engine과 Compose plugin이 없으면 Docker 공식 저장소에서
-설치하고, gateway·SLAM/Nav2·카메라 지도 합성 이미지를 빌드한 다음 systemd에
+설치하고, gateway와 LiDAR SLAM/Nav2 이미지를 빌드한 다음 systemd에
 등록합니다. 이후 PC를 재부팅해도 서버가 자동으로 시작됩니다.
 
 인터넷이 없는 Ubuntu에 옮기려면 먼저 Docker가 실행되는 같은 CPU 아키텍처의

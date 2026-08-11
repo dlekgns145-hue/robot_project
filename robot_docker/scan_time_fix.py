@@ -19,16 +19,26 @@ from sensor_msgs.msg import LaserScan
 SELF_REFLECTION_MIN_ANGLE_DEG = -155.0
 SELF_REFLECTION_MAX_ANGLE_DEG = -145.0
 SELF_REFLECTION_MAX_RANGE_M = 0.22
+REAR_HOUSING_MIN_ANGLE_DEG = -172.0
+REAR_HOUSING_MAX_ANGLE_DEG = -164.0
+REAR_HOUSING_MAX_RANGE_M = 0.16
 
 
 def is_self_reflection(angle_radians: float, distance: float) -> bool:
     angle_degrees = math.degrees(angle_radians)
-    return (
-        SELF_REFLECTION_MIN_ANGLE_DEG
-        <= angle_degrees
-        <= SELF_REFLECTION_MAX_ANGLE_DEG
-        and math.isfinite(distance)
-        and distance <= SELF_REFLECTION_MAX_RANGE_M
+    return math.isfinite(distance) and (
+        (
+            SELF_REFLECTION_MIN_ANGLE_DEG
+            <= angle_degrees
+            <= SELF_REFLECTION_MAX_ANGLE_DEG
+            and distance <= SELF_REFLECTION_MAX_RANGE_M
+        )
+        or (
+            REAR_HOUSING_MIN_ANGLE_DEG
+            <= angle_degrees
+            <= REAR_HOUSING_MAX_ANGLE_DEG
+            and distance <= REAR_HOUSING_MAX_RANGE_M
+        )
     )
 
 

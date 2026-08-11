@@ -153,6 +153,28 @@ class GatewayProtocolTests(unittest.TestCase):
 
         self.assertEqual(connection.payloads, [b'{"heartbeat":1}\n'])
 
+    def test_gui_disconnect_releases_manual_control_without_emergency(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.payloads: list[bytes] = []
+
+            def sendall(self, payload: bytes) -> None:
+                self.payloads.append(payload)
+
+            def recv(self, _size: int) -> bytes:
+                return b'{"ok":true}\n'
+
+        relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+        connection = RecordingConnection()
+        relay.connection = connection  # type: ignore[assignment]
+
+        relay.release_manual_control()
+
+        self.assertEqual(
+            connection.payloads, [b'{"linear":0.0,"angular":0.0}\n']
+        )
+        self.assertNotIn(b"emergency_stop", connection.payloads[0])
+
     def test_disconnected_status_does_not_report_stale_ip_as_current(self) -> None:
         relay = RobotRelay(RobotLocator(robot_mac="dc:a6:32:01:02:03"))
         relay.resolution = Resolution("172.30.1.18", "mac-neighbor")

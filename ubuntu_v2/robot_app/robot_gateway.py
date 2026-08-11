@@ -296,6 +296,20 @@ class RobotRelay:
             self.applied_linear = 0.0
             self.applied_angular = 0.0
 
+    def release_manual_control(self) -> None:
+        """Release a GUI manual-control lease without canceling autonomous work."""
+        with self.lock:
+            if self.connection is not None:
+                try:
+                    # The robot bridge ignores ordinary manual commands while
+                    # Nav2 owns the motors.  An emergency stop here would also
+                    # cancel autonomous mapping whenever a GUI goes idle.
+                    self._exchange_unlocked({"linear": 0.0, "angular": 0.0})
+                except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+                    pass
+            self.applied_linear = 0.0
+            self.applied_angular = 0.0
+
     def shutdown(self) -> None:
         self._shutdown_event.set()
         self._reconnect_event.set()
@@ -416,7 +430,7 @@ def serve_gui(
                     json.dumps(response, separators=(",", ":")).encode() + b"\n"
                 )
     finally:
-        relay.safe_stop()
+        relay.release_manual_control()
 
 
 def main() -> None:

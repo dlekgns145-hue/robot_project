@@ -74,7 +74,7 @@ services:
       retries: 3
       start_period: 5s
 
-  # Heavy SLAM/Nav2/camera-map processing runs on the Ubuntu compute server.
+  # LiDAR SLAM/Nav2 processing runs on the Ubuntu compute server.
   # Raw robot topics arrive over ROS 2 DDS; only /cmd_vel_server is returned.
   compute-mapping:
     image: ${ROBOT_COMPUTE_IMAGE:-robot-control-compute:humble}
@@ -93,24 +93,17 @@ services:
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
       ROS_LOCALHOST_ONLY: "1"
-      ROBOT_CAMERA_URL: ${ROBOT_CAMERA_URL:-http://172.30.1.10:8080/stream.mjpg}
+      # Fast DDS shared-memory discovery is unreliable across the compute and
+      # Zenoh containers even with a shared IPC namespace. Keep host-local DDS
+      # on loopback UDP; Zenoh remains the only cross-host transport.
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       ROBOT_MAP_OUTPUT: /opt/robot-control/maps/orchard_map
       ROBOT_MAPPING_MAXIMUM_RUNTIME: ${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}
       ROBOT_MAPPING_MAXIMUM_RADIUS: ${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}
-      ROBOT_TEXTURE_SOURCE_TOP_FRACTION: ${ROBOT_TEXTURE_SOURCE_TOP_FRACTION:-0.50}
-      ROBOT_TEXTURE_NEAR_M: ${ROBOT_TEXTURE_NEAR_M:-0.18}
-      ROBOT_TEXTURE_FAR_M: ${ROBOT_TEXTURE_FAR_M:-2.0}
-      ROBOT_TEXTURE_NEAR_WIDTH_M: ${ROBOT_TEXTURE_NEAR_WIDTH_M:-0.85}
-      ROBOT_TEXTURE_FAR_WIDTH_M: ${ROBOT_TEXTURE_FAR_WIDTH_M:-1.8}
-      ROBOT_CAMERA_HORIZONTAL_FOV_DEG: ${ROBOT_CAMERA_HORIZONTAL_FOV_DEG:-68.0}
-      ROBOT_CAMERA_VERTICAL_FOV_DEG: ${ROBOT_CAMERA_VERTICAL_FOV_DEG:-50.0}
-      ROBOT_CAMERA_YAW_OFFSET_DEG: ${ROBOT_CAMERA_YAW_OFFSET_DEG:-0.0}
-      ROBOT_CAMERA_PITCH_DOWN_DEG: ${ROBOT_CAMERA_PITCH_DOWN_DEG:-18.0}
-      ROBOT_CAMERA_HEIGHT_M: ${ROBOT_CAMERA_HEIGHT_M:-0.24}
-      ROBOT_LIDAR_X_OFFSET_M: ${ROBOT_LIDAR_X_OFFSET_M:--0.0046}
-      ROBOT_LIDAR_Y_OFFSET_M: ${ROBOT_LIDAR_Y_OFFSET_M:-0.0}
-      ROBOT_OBSTACLE_LAYER_RENDER_PERIOD: ${ROBOT_OBSTACLE_LAYER_RENDER_PERIOD:-2.0}
-      ROBOT_SENSOR_SYNC_MAXIMUM_SKEW: ${ROBOT_SENSOR_SYNC_MAXIMUM_SKEW:-0.18}
+      ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT: ${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-55.0}
+      ROBOT_MAPPING_MAXIMUM_MAP_AGE: ${ROBOT_MAPPING_MAXIMUM_MAP_AGE:-8.0}
+      ROBOT_MAPPING_MINIMUM_SAVE_KNOWN_AREA: ${ROBOT_MAPPING_MINIMUM_SAVE_KNOWN_AREA:-1.0}
+      ROBOT_MAPPING_MINIMUM_SAVE_FREE_AREA: ${ROBOT_MAPPING_MINIMUM_SAVE_FREE_AREA:-0.5}
     volumes:
       - ./maps:/opt/robot-control/maps
     command: ["mapping-server"]
@@ -134,6 +127,7 @@ services:
       ROS_DISTRO: humble
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-20}
       ROS_LOCALHOST_ONLY: "1"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
     volumes:
       - ./zenoh/server-transport.json5:/etc/zenoh/transport.json5:ro
     command: ["-c", "/etc/zenoh/transport.json5"]

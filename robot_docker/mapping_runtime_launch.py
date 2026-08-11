@@ -13,7 +13,6 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
 )
-from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetRemap
@@ -28,39 +27,38 @@ def generate_launch_description():
     nav_params_path = LaunchConfiguration("nav_params_file")
     exploration_enabled = LaunchConfiguration("exploration_enabled")
     map_output = LaunchConfiguration("map_output")
-    camera_url = LaunchConfiguration("camera_url")
-    camera_guard_enabled = LaunchConfiguration("camera_guard_enabled")
-    visual_mapper_enabled = LaunchConfiguration("visual_mapper_enabled")
-    legacy_texture_mapper_enabled = LaunchConfiguration(
-        "legacy_texture_mapper_enabled"
-    )
-    texture_source_top_fraction = LaunchConfiguration(
-        "texture_source_top_fraction"
-    )
-    texture_near_m = LaunchConfiguration("texture_near_m")
-    texture_far_m = LaunchConfiguration("texture_far_m")
-    texture_near_width_m = LaunchConfiguration("texture_near_width_m")
-    texture_far_width_m = LaunchConfiguration("texture_far_width_m")
-    camera_horizontal_fov_deg = LaunchConfiguration("camera_horizontal_fov_deg")
-    camera_vertical_fov_deg = LaunchConfiguration("camera_vertical_fov_deg")
-    camera_yaw_offset_deg = LaunchConfiguration("camera_yaw_offset_deg")
-    camera_pitch_down_deg = LaunchConfiguration("camera_pitch_down_deg")
-    camera_height_m = LaunchConfiguration("camera_height_m")
-    lidar_x_offset_m = LaunchConfiguration("lidar_x_offset_m")
-    lidar_y_offset_m = LaunchConfiguration("lidar_y_offset_m")
-    obstacle_layer_render_period = LaunchConfiguration(
-        "obstacle_layer_render_period"
-    )
-    sensor_sync_maximum_skew = LaunchConfiguration("sensor_sync_maximum_skew")
     mapping_maximum_runtime = LaunchConfiguration("mapping_maximum_runtime")
     mapping_maximum_radius = LaunchConfiguration("mapping_maximum_radius")
+    mapping_goal_progress_timeout = LaunchConfiguration(
+        "mapping_goal_progress_timeout"
+    )
+    mapping_maximum_map_age = LaunchConfiguration("mapping_maximum_map_age")
+    mapping_minimum_save_known_area = LaunchConfiguration(
+        "mapping_minimum_save_known_area"
+    )
+    mapping_minimum_save_free_area = LaunchConfiguration(
+        "mapping_minimum_save_free_area"
+    )
     # Frontier exploration cares about reaching the free cell, not finishing
     # at an exact heading.  Keep normal saved-map navigation at its stricter
     # yaw tolerance and relax it only inside the mapping runtime.
     mapping_nav_params = RewrittenYaml(
         source_file=nav_params_path,
         root_key="",
-        param_rewrites={"yaw_goal_tolerance": "3.14"},
+        param_rewrites={
+            "yaw_goal_tolerance": "3.14",
+            # Mapping goals are deliberately placed on safe known-free cells.
+            # A 0.5 m planner tolerance plus a 0.25 m goal tolerance allowed
+            # Nav2 to report success while the robot was still about 0.7 m
+            # from the frontier, causing an endless no-motion retry loop.
+            "planner_server.ros__parameters.GridBased.tolerance": "0.10",
+            "controller_server.ros__parameters.general_goal_checker.xy_goal_tolerance": "0.15",
+            "controller_server.ros__parameters.FollowPath.xy_goal_tolerance": "0.15",
+            # Mapping and exploration are deliberately LiDAR-only.  Camera
+            # imagery may be georeferenced later, but it must never affect the
+            # occupancy grid or the path used to create it.
+            "observation_sources": "scan",
+        },
         convert_types=True,
     )
 
@@ -81,49 +79,22 @@ def generate_launch_description():
                 default_value="/opt/robot-control/maps/orchard_map",
             ),
             DeclareLaunchArgument(
-                "camera_url",
-                default_value="http://127.0.0.1:8080/stream.mjpg",
-            ),
-            DeclareLaunchArgument("camera_guard_enabled", default_value="true"),
-            DeclareLaunchArgument("visual_mapper_enabled", default_value="false"),
-            DeclareLaunchArgument(
-                "legacy_texture_mapper_enabled", default_value="false"
-            ),
-            DeclareLaunchArgument(
-                "texture_source_top_fraction", default_value="0.50"
-            ),
-            DeclareLaunchArgument("texture_near_m", default_value="0.18"),
-            DeclareLaunchArgument("texture_far_m", default_value="2.0"),
-            DeclareLaunchArgument(
-                "texture_near_width_m", default_value="0.85"
-            ),
-            DeclareLaunchArgument(
-                "texture_far_width_m", default_value="1.8"
-            ),
-            DeclareLaunchArgument(
-                "camera_horizontal_fov_deg", default_value="68.0"
-            ),
-            DeclareLaunchArgument(
-                "camera_vertical_fov_deg", default_value="50.0"
-            ),
-            DeclareLaunchArgument("camera_yaw_offset_deg", default_value="0.0"),
-            DeclareLaunchArgument(
-                "camera_pitch_down_deg", default_value="18.0"
-            ),
-            DeclareLaunchArgument("camera_height_m", default_value="0.24"),
-            DeclareLaunchArgument("lidar_x_offset_m", default_value="-0.0046"),
-            DeclareLaunchArgument("lidar_y_offset_m", default_value="0.0"),
-            DeclareLaunchArgument(
-                "obstacle_layer_render_period", default_value="2.0"
-            ),
-            DeclareLaunchArgument(
-                "sensor_sync_maximum_skew", default_value="0.18"
-            ),
-            DeclareLaunchArgument(
                 "mapping_maximum_runtime", default_value="900.0"
             ),
             DeclareLaunchArgument(
                 "mapping_maximum_radius", default_value="8.0"
+            ),
+            DeclareLaunchArgument(
+                "mapping_goal_progress_timeout", default_value="55.0"
+            ),
+            DeclareLaunchArgument(
+                "mapping_maximum_map_age", default_value="8.0"
+            ),
+            DeclareLaunchArgument(
+                "mapping_minimum_save_known_area", default_value="1.0"
+            ),
+            DeclareLaunchArgument(
+                "mapping_minimum_save_free_area", default_value="0.5"
             ),
             GroupAction(
                 [
@@ -169,42 +140,6 @@ def generate_launch_description():
                             "maximum_range_m:=4.0",
                         ],
                         output="screen",
-                    ),
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            f"{runtime_dir}/camera_obstacle_guard.py",
-                            "--ros-args",
-                            "-p",
-                            ["camera_url:=", camera_url],
-                        ],
-                        output="screen",
-                        condition=IfCondition(camera_guard_enabled),
-                    ),
-                    Node(
-                        package="orchard_mapper",
-                        executable="camera_bev_node",
-                        name="camera_bev",
-                        parameters=[
-                            "/opt/robot-control/orchard_ws/install/share/"
-                            "orchard_mapper/config/mapper.yaml",
-                            {"camera_url": camera_url},
-                        ],
-                        output="screen",
-                        condition=IfCondition(visual_mapper_enabled),
-                    ),
-                    Node(
-                        package="orchard_mapper",
-                        executable="global_visual_mapper",
-                        name="orchard_visual_mapper",
-                        parameters=[
-                            "/opt/robot-control/orchard_ws/install/share/"
-                            "orchard_mapper/config/mapper.yaml",
-                            {"use_sim_time": use_sim_time},
-                        ],
-                        remappings=[("/tf", "/tf_nav")],
-                        output="screen",
-                        condition=IfCondition(visual_mapper_enabled),
                     ),
                     ExecuteProcess(
                         cmd=[
@@ -304,72 +239,25 @@ def generate_launch_description():
                                 "maximum_exploration_radius:=",
                                 mapping_maximum_radius,
                             ],
-                        ],
-                        output="screen",
-                    ),
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            f"{runtime_dir}/map_texture_recorder.py",
-                            "--ros-args",
-                            "-r",
-                            "/tf:=/tf_nav",
-                            "-p",
-                            ["camera_url:=", camera_url],
-                            "-p",
-                            ["projection_near_m:=", texture_near_m],
-                            "-p",
-                            ["projection_far_m:=", texture_far_m],
                             "-p",
                             [
-                                "projection_near_width_m:=",
-                                texture_near_width_m,
+                                "goal_progress_timeout:=",
+                                mapping_goal_progress_timeout,
+                            ],
+                            "-p",
+                            ["maximum_map_age:=", mapping_maximum_map_age],
+                            "-p",
+                            [
+                                "minimum_save_known_area_m2:=",
+                                mapping_minimum_save_known_area,
                             ],
                             "-p",
                             [
-                                "projection_far_width_m:=",
-                                texture_far_width_m,
-                            ],
-                            "-p",
-                            [
-                                "projection_source_top_fraction:=",
-                                texture_source_top_fraction,
-                            ],
-                            "-p",
-                            ["map_output:=", map_output],
-                            "-p",
-                            [
-                                "camera_horizontal_fov_deg:=",
-                                camera_horizontal_fov_deg,
-                            ],
-                            "-p",
-                            [
-                                "camera_vertical_fov_deg:=",
-                                camera_vertical_fov_deg,
-                            ],
-                            "-p",
-                            ["camera_yaw_offset_deg:=", camera_yaw_offset_deg],
-                            "-p",
-                            ["camera_pitch_down_deg:=", camera_pitch_down_deg],
-                            "-p",
-                            ["camera_height_m:=", camera_height_m],
-                            "-p",
-                            ["lidar_x_offset_m:=", lidar_x_offset_m],
-                            "-p",
-                            ["lidar_y_offset_m:=", lidar_y_offset_m],
-                            "-p",
-                            [
-                                "live_render_period:=",
-                                obstacle_layer_render_period,
-                            ],
-                            "-p",
-                            [
-                                "maximum_sensor_skew:=",
-                                sensor_sync_maximum_skew,
+                                "minimum_save_free_area_m2:=",
+                                mapping_minimum_save_free_area,
                             ],
                         ],
                         output="screen",
-                        condition=IfCondition(legacy_texture_mapper_enabled),
                     ),
                 ]
             ),

@@ -129,6 +129,7 @@ def reachable_free_cell_indices(
     robot_x: float,
     robot_y: float,
     free_max: int = 20,
+    maximum_seed_distance: float = 0.0,
 ) -> set[int]:
     """Return the known-free component connected to the robot.
 
@@ -143,6 +144,7 @@ def reachable_free_cell_indices(
         robot_x=robot_x,
         robot_y=robot_y,
         free_max=free_max,
+        maximum_seed_distance=maximum_seed_distance,
     )
     return reachable
 
@@ -154,8 +156,16 @@ def _reachable_free_tree(
     robot_x: float,
     robot_y: float,
     free_max: int = 20,
+    maximum_seed_distance: float = 0.0,
+    minimum_path_obstacle_clearance: float = 0.0,
 ) -> tuple[set[int], dict[int, int | None]]:
-    """Return the robot-connected free cells and a shortest-path parent tree."""
+    """Return robot-traversable free cells and a shortest-path parent tree.
+
+    Raw free-cell connectivity is insufficient for a physical robot: a
+    one-cell gap can connect two rooms in the occupancy grid even though the
+    footprint cannot pass through it.  Optional path clearance removes those
+    cells before reachability is evaluated.
+    """
 
     expected = spec.width * spec.height
     if spec.width <= 0 or spec.height <= 0 or len(data) != expected:
@@ -165,6 +175,18 @@ def _reachable_free_tree(
     free_cells = {
         index for index, value in enumerate(data) if 0 <= value <= free_max
     }
+    if minimum_path_obstacle_clearance > 0.0:
+        free_cells = {
+            index
+            for index in free_cells
+            if cell_has_obstacle_clearance(
+                data,
+                spec,
+                index,
+                clearance_m=minimum_path_obstacle_clearance,
+                free_max=free_max,
+            )
+        }
     if not free_cells:
         return set(), {}
 
@@ -182,6 +204,15 @@ def _reachable_free_tree(
                 + (index // spec.width - robot_grid_y) ** 2
             ),
         )
+        if maximum_seed_distance > 0.0:
+            seed_x = seed % spec.width
+            seed_y = seed // spec.width
+            seed_distance = math.hypot(
+                seed_x - robot_grid_x,
+                seed_y - robot_grid_y,
+            ) * spec.resolution
+            if seed_distance > maximum_seed_distance:
+                return set(), {}
 
     reachable = {seed}
     parents: dict[int, int | None] = {seed: None}
@@ -307,6 +338,7 @@ def frontier_candidates(
     goal_standoff: float = 0.0,
     maximum_goal_step_distance: float = 0.0,
     minimum_obstacle_clearance: float = 0.0,
+    maximum_robot_free_seed_distance: float = 0.0,
 ) -> list[FrontierCandidate]:
     """Return scored, reachable frontier approach goals, best first.
 
@@ -322,6 +354,8 @@ def frontier_candidates(
         spec,
         robot_x=robot_x,
         robot_y=robot_y,
+        maximum_seed_distance=maximum_robot_free_seed_distance,
+        minimum_path_obstacle_clearance=minimum_obstacle_clearance,
     )
     candidates: list[FrontierCandidate] = []
 
@@ -351,7 +385,7 @@ def frontier_candidates(
             target_distance = (
                 _path_step_count(approach_index, parents) * spec.resolution
             )
-            if target_distance < min_distance or target_distance > max_distance:
+            if target_distance < min_distance:
                 continue
             staged_index = _staged_path_cell(
                 approach_index,
@@ -363,6 +397,12 @@ def frontier_candidates(
             grid_y = staged_index // spec.width
             world_x, world_y = grid_cell_to_world(grid_x, grid_y, spec)
             distance = _path_step_count(staged_index, parents) * spec.resolution
+            # A distant frontier is still actionable when it can be reached
+            # through bounded intermediate goals.  Applying max_distance to
+            # the final frontier before staging incorrectly discarded exactly
+            # the large unexplored regions that staging is intended to reach.
+            if max_distance > 0.0 and distance > max_distance:
+                continue
             if not cell_has_obstacle_clearance(
                 data,
                 spec,

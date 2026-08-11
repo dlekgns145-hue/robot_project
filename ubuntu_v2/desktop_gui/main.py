@@ -1022,6 +1022,20 @@ class MainWindow(QMainWindow):
             self._last_live_map_sequence = -1
         if distance is not None:
             details.append(f"목표까지 {float(distance):.2f} m")
+        quality = mapping.get("map_quality")
+        if isinstance(quality, dict):
+            known_area = quality.get("known_area_m2")
+            free_area = quality.get("free_area_m2")
+            if known_area is not None and free_area is not None:
+                details.append(
+                    f"관측 {float(known_area):.2f} m² / 주행가능 {float(free_area):.2f} m²"
+                )
+        map_age = mapping.get("map_age_seconds")
+        if map_age is not None and float(map_age) >= 3.0:
+            details.append(f"지도 지연 {float(map_age):.1f}초")
+        save_error = str(mapping.get("last_save_error") or "")
+        if save_error:
+            details.append(f"저장 오류: {save_error}")
         suffix = f" · {' · '.join(details)}" if details else ""
         self.mapping_status_label.setText(f"{message}{suffix}")
         available = state != "unavailable" and self.robot_connected

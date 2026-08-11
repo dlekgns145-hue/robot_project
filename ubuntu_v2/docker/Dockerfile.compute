@@ -18,9 +18,6 @@ RUN ros_source_files="$(grep -RIl 'packages\.ros\.org/ros2/ubuntu' \
     && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         python3-opencv \
         python3-numpy \
-        python3-colcon-common-extensions \
-        ros-humble-cv-bridge \
-        ros-humble-message-filters \
         ros-humble-navigation2 \
         ros-humble-nav2-bringup \
         ros-humble-slam-toolbox \
@@ -41,10 +38,7 @@ COPY robot_docker/navigation_runtime_launch.py \
      robot_docker/scan_time_fix.py \
      robot_docker/autonomous_mapping.py \
      robot_docker/frontier_core.py \
-     robot_docker/map_texture_core.py \
-     robot_docker/obstacle_texture_fusion.py \
-     robot_docker/map_texture_recorder.py \
-     robot_docker/calibrate_map_texture.py \
+     robot_docker/mapping_core.py \
      robot_docker/camera_obstacle_guard.py \
      /opt/robot-control/navigation/
 COPY robot_docker/recovered/Broom.yaml \
@@ -52,12 +46,6 @@ COPY robot_docker/recovered/Broom.yaml \
      robot_docker/recovered/dwb_nav_params_fixed.yaml \
      robot_docker/mapping_slam_params.yaml \
      /opt/robot-control/navigation/
-
-COPY orchard_mapper /opt/robot-control/orchard_ws/src/orchard_mapper
-
-RUN . /opt/ros/humble/setup.sh \
-    && cd /opt/robot-control/orchard_ws \
-    && colcon build --merge-install --packages-select orchard_mapper
 
 RUN chmod 0755 /opt/robot-control/entrypoint.sh \
     /opt/robot-control/navigation/*.py \

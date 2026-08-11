@@ -45,11 +45,13 @@ class ServerImageTests(unittest.TestCase):
         self.assertIn("mirrors.aliyun.com/ros2/ubuntu", dockerfile)
         self.assertIn("Acquire::ForceIPv4=true", dockerfile)
 
-    def test_compute_image_builds_orchard_mapper(self):
+    def test_compute_image_is_lidar_mapping_only(self):
         dockerfile = (ROOT / "ubuntu_v2" / "docker" / "Dockerfile.compute").read_text()
-        self.assertIn("ros-humble-cv-bridge", dockerfile)
-        self.assertIn("COPY orchard_mapper", dockerfile)
-        self.assertIn("colcon build --merge-install", dockerfile)
+        self.assertIn("robot_docker/mapping_core.py", dockerfile)
+        self.assertIn("ros-humble-slam-toolbox", dockerfile)
+        self.assertNotIn("COPY orchard_mapper", dockerfile)
+        self.assertNotIn("colcon build --merge-install", dockerfile)
+        self.assertNotIn("map_texture_recorder.py", dockerfile)
 
     def test_robot_transport_uses_dedicated_compute_port(self):
         server_compose = (ROOT / "ubuntu_v2" / "compose.yaml").read_text()
@@ -76,32 +78,36 @@ class ServerImageTests(unittest.TestCase):
         self.assertIn('"/navigate_to_pose"', server_transport)
         self.assertIn("ros_localhost_only: true", robot_transport)
         self.assertIn('ROS_LOCALHOST_ONLY: "1"', robot_compose)
+        self.assertGreaterEqual(
+            server_compose.count("FASTDDS_BUILTIN_TRANSPORTS: UDPv4"), 2
+        )
 
-    def test_mapping_server_enables_new_visual_mapper(self):
+    def test_mapping_server_is_lidar_only(self):
         entrypoint = (ROOT / "robot_docker" / "entrypoint.sh").read_text()
         launch_file = (ROOT / "robot_docker" / "mapping_runtime_launch.py").read_text()
-        self.assertIn('visual_mapper_enabled="true"', entrypoint)
-        self.assertIn('package="orchard_mapper"', launch_file)
-        self.assertIn('executable="global_visual_mapper"', launch_file)
+        self.assertNotIn("visual_mapper_enabled", entrypoint)
+        self.assertNotIn('package="orchard_mapper"', launch_file)
+        self.assertNotIn("map_texture_recorder.py", launch_file)
+        self.assertIn('"observation_sources": "scan"', launch_file)
 
     def test_bundle_builder_does_not_copy_desktop_gui(self):
         builder = (ROOT / "server_image" / "build_server_image.sh").read_text()
         self.assertNotIn('cp -a "${PROJECT_DIR}/ubuntu_v2"', builder)
         self.assertIn('"${PROJECT_DIR}/ubuntu_v2/docker/."', builder)
         self.assertIn("check_server_environment.sh", builder)
-        self.assertIn("configure_camera_source.sh", builder)
-        self.assertIn("phone_camera_layer_test.py", builder)
-        self.assertIn("phone_scene_capture.py", builder)
-        self.assertIn("manage_phone_scene_capture.sh", builder)
-        self.assertIn("analyze_phone_scene_capture.py", builder)
+        self.assertNotIn("configure_camera_source.sh", builder)
+        self.assertNotIn("phone_camera_layer_test.py", builder)
+        self.assertNotIn("phone_scene_capture.py", builder)
         self.assertIn("robot-control-server-images.tar", builder)
-        self.assertIn('"${PROJECT_DIR}/orchard_mapper/."', builder)
+        self.assertNotIn('"${PROJECT_DIR}/orchard_mapper/."', builder)
+        self.assertIn('"${PROJECT_DIR}/robot_docker/mapping_core.py"', builder)
         self.assertIn("COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata", builder)
 
-    def test_installer_copies_orchard_mapper_build_context(self):
+    def test_installer_omits_visual_mapping_build_context(self):
         installer = (ROOT / "server_image" / "INSTALL_SERVER.sh").read_text()
-        self.assertIn('"${SOURCE_DIR}/orchard_mapper/."', installer)
-        self.assertIn('"${INSTALL_DIR}/orchard_mapper/"', installer)
+        self.assertNotIn('"${SOURCE_DIR}/orchard_mapper/."', installer)
+        self.assertNotIn('"${INSTALL_DIR}/orchard_mapper/"', installer)
+        self.assertNotIn("map_texture_recorder.py", installer)
 
 
 if __name__ == "__main__":

@@ -134,8 +134,7 @@ fi
 
 echo "Installing server application into ${INSTALL_DIR}..."
 install -d "${INSTALL_DIR}/ubuntu_v2" "${INSTALL_DIR}/ubuntu_v2/zenoh" \
-    "${INSTALL_DIR}/robot_docker" \
-    "${INSTALL_DIR}/orchard_mapper"
+    "${INSTALL_DIR}/robot_docker"
 
 # Preserve generated maps, the operations database, and the active .env when
 # the installer is run again. Application files are refreshed in place.
@@ -146,7 +145,6 @@ cp -a "${SOURCE_DIR}/ubuntu_v2/systemd" "${INSTALL_DIR}/ubuntu_v2/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/zenoh/." "${INSTALL_DIR}/ubuntu_v2/zenoh/"
 cp -a "${SOURCE_DIR}/ubuntu_v2/compose.yaml" "${INSTALL_DIR}/ubuntu_v2/compose.yaml"
 cp -a "${SOURCE_DIR}/ubuntu_v2/.env.example" "${INSTALL_DIR}/ubuntu_v2/.env.example"
-cp -a "${SOURCE_DIR}/orchard_mapper/." "${INSTALL_DIR}/orchard_mapper/"
 install -d "${INSTALL_DIR}/robot_docker/recovered"
 cp -a \
     "${SOURCE_DIR}/robot_docker/entrypoint.sh" \
@@ -163,10 +161,6 @@ cp -a \
     "${SOURCE_DIR}/robot_docker/scan_time_fix.py" \
     "${SOURCE_DIR}/robot_docker/autonomous_mapping.py" \
     "${SOURCE_DIR}/robot_docker/frontier_core.py" \
-    "${SOURCE_DIR}/robot_docker/map_texture_core.py" \
-    "${SOURCE_DIR}/robot_docker/obstacle_texture_fusion.py" \
-    "${SOURCE_DIR}/robot_docker/map_texture_recorder.py" \
-    "${SOURCE_DIR}/robot_docker/calibrate_map_texture.py" \
     "${SOURCE_DIR}/robot_docker/camera_obstacle_guard.py" \
     "${SOURCE_DIR}/robot_docker/mapping_slam_params.yaml" \
     "${INSTALL_DIR}/robot_docker/"
@@ -218,7 +212,6 @@ set_env_value() {
 
 set_env_value ROBOT_IP "${ROBOT_IP}"
 set_env_value ROBOT_MAC "${ROBOT_MAC,,}"
-set_env_value ROBOT_CAMERA_URL "http://${ROBOT_IP}:8080/stream.mjpg"
 set_env_value COMMAND_TOKEN "${COMMAND_TOKEN}"
 chmod 0600 "${ENV_FILE}"
 

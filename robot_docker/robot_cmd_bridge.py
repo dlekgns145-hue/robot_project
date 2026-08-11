@@ -64,9 +64,6 @@ NAVIGATION_LEASE_TIMEOUT = float(os.getenv("NAVIGATION_LEASE_TIMEOUT_SEC", "2.5"
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
 LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
-MAP_TEXTURE_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_texture.png"
-MAP_OBSTACLE_TEXTURE_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_obstacles.png"
-MAP_MATERIALS_PATH = f"{MAP_DIRECTORY}/{MAP_NAME}_materials.json"
 
 OBSTACLE_AVOIDANCE_ENABLED = True
 OBSTACLE_STOP_DISTANCE_M = 0.40
@@ -84,6 +81,9 @@ BACKUP_SPEED = -0.20
 
 LIDAR_MIN_VALID_RANGE = 0.02
 LIDAR_STALE_SEC = 2.0
+REAR_HOUSING_MIN_ANGLE_DEG = -172.0
+REAR_HOUSING_MAX_ANGLE_DEG = -164.0
+REAR_HOUSING_MAX_RANGE_M = 0.16
 CAMERA_STALE_SEC = 1.0
 CAMERA_STOP_DISTANCE_M = 0.45
 CAMERA_CRITICAL_DISTANCE_M = 0.30
@@ -99,6 +99,19 @@ ESCAPE_TURN_TIME_SEC = 2.5  # 이 시간 동안 LiDAR 무시하고 무조건 회
 SERVO_TILT_DEFAULT = -80
 SERVO_PAN_MIN = -60
 SERVO_PAN_MAX = 60
+
+
+def is_rear_housing_reflection(angle_radians: float, distance: float) -> bool:
+    """Ignore only the measured three-beam reflection from the robot body."""
+
+    angle_degrees = math.degrees(angle_radians)
+    return (
+        REAR_HOUSING_MIN_ANGLE_DEG
+        <= angle_degrees
+        <= REAR_HOUSING_MAX_ANGLE_DEG
+        and math.isfinite(distance)
+        and distance <= REAR_HOUSING_MAX_RANGE_M
+    )
 
 
 def shape_server_velocity(linear: float, angular: float) -> tuple[float, float]:
@@ -376,9 +389,14 @@ class CmdBridgeNode(Node):
         right_dists = []
 
         for i, r in enumerate(msg.ranges):
-            if r < LIDAR_MIN_VALID_RANGE or math.isinf(r) or math.isnan(r):
-                continue
             angle = angle_min + i * angle_increment
+            if (
+                r < LIDAR_MIN_VALID_RANGE
+                or math.isinf(r)
+                or math.isnan(r)
+                or is_rear_housing_reflection(angle, r)
+            ):
+                continue
             if -front_range_rad <= angle <= front_range_rad:
                 if r < front_min_dist:
                     front_min_dist = r
@@ -859,39 +877,9 @@ class CmdBridgeNode(Node):
             "negate": int(metadata.get("negate", "0")),
             "occupied_thresh": float(metadata.get("occupied_thresh", "0.65")),
             "free_thresh": float(metadata.get("free_thresh", "0.25")),
+            "occupancy_source": "lidar_slam_only",
+            "navigation_safe": True,
         }
-        try:
-            if os.path.getmtime(MAP_TEXTURE_PATH) < os.path.getmtime(image_path):
-                raise OSError("camera texture is older than occupancy map")
-            with open(MAP_TEXTURE_PATH, "rb") as texture_file:
-                texture_data = texture_file.read()
-            payload["texture_base64"] = base64.b64encode(texture_data).decode(
-                "ascii"
-            )
-            payload["texture_format"] = "png"
-        except OSError:
-            pass
-        try:
-            if os.path.getmtime(MAP_OBSTACLE_TEXTURE_PATH) < os.path.getmtime(
-                image_path
-            ):
-                raise OSError("camera obstacle texture is older than occupancy map")
-            with open(MAP_OBSTACLE_TEXTURE_PATH, "rb") as obstacle_file:
-                obstacle_data = obstacle_file.read()
-            payload["obstacle_texture_base64"] = base64.b64encode(
-                obstacle_data
-            ).decode("ascii")
-        except OSError:
-            pass
-        try:
-            if os.path.getmtime(MAP_MATERIALS_PATH) < os.path.getmtime(image_path):
-                raise OSError("camera material metadata is older than occupancy map")
-            with open(MAP_MATERIALS_PATH, "r", encoding="utf-8") as materials_file:
-                materials = json.load(materials_file)
-            if isinstance(materials, dict):
-                payload["obstacle_materials"] = materials
-        except (OSError, json.JSONDecodeError):
-            pass
         return payload
 
     def _fill_with_desired(self, twist: Twist):

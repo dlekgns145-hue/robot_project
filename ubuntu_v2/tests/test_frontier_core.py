@@ -97,6 +97,34 @@ class FrontierCoreTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertLess(candidates[0].grid_x, 3)
 
+    def test_far_free_seed_is_rejected_when_robot_pose_is_outside_map(self) -> None:
+        spec = GridSpec(width=10, height=10, resolution=0.1)
+        data = [-1] * 100
+        for y in range(6, 9):
+            for x in range(6, 9):
+                data[y * spec.width + x] = 0
+
+        reachable = reachable_free_cell_indices(
+            data,
+            spec,
+            robot_x=0.05,
+            robot_y=0.05,
+            maximum_seed_distance=0.5,
+        )
+        candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.05,
+            robot_y=0.05,
+            min_cells=2,
+            min_distance=0.0,
+            max_distance=10.0,
+            maximum_robot_free_seed_distance=0.5,
+        )
+
+        self.assertEqual(reachable, set())
+        self.assertEqual(candidates, [])
+
     def test_goal_standoff_selects_stable_interior_free_cell(self) -> None:
         spec = GridSpec(width=7, height=7, resolution=0.1)
         data = [-1] * 49
@@ -145,6 +173,31 @@ class FrontierCoreTests(unittest.TestCase):
         goal_index = candidates[0].grid_y * spec.width + candidates[0].grid_x
         self.assertEqual(data[goal_index], 0)
 
+    def test_frontier_beyond_goal_limit_uses_bounded_staged_goal(self) -> None:
+        spec = GridSpec(width=40, height=5, resolution=0.1)
+        data = [-1] * (spec.width * spec.height)
+        for x in range(spec.width):
+            data[1 * spec.width + x] = 100
+            data[3 * spec.width + x] = 100
+        data[2 * spec.width] = 100
+        for x in range(1, 36):
+            data[2 * spec.width + x] = 0
+
+        candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.15,
+            robot_y=0.25,
+            min_cells=1,
+            min_distance=0.0,
+            max_distance=1.5,
+            maximum_goal_step_distance=1.0,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertLessEqual(candidates[0].distance, 1.01)
+        self.assertGreater(candidates[0].grid_x, 1)
+
     def test_goal_too_close_to_occupied_cell_is_rejected(self) -> None:
         spec = GridSpec(width=9, height=9, resolution=0.1)
         data = [-1] * (spec.width * spec.height)
@@ -170,6 +223,42 @@ class FrontierCoreTests(unittest.TestCase):
                 clearance_m=0.25,
             )
         )
+
+    def test_narrow_connection_does_not_make_frontier_reachable(self) -> None:
+        spec = GridSpec(width=20, height=9, resolution=0.1)
+        data = [100] * (spec.width * spec.height)
+        for y in range(2, 7):
+            for x in range(1, 6):
+                data[y * spec.width + x] = 0
+            for x in range(14, 19):
+                data[y * spec.width + x] = 0
+        for x in range(6, 14):
+            data[4 * spec.width + x] = 0
+        for y in range(2, 7):
+            data[y * spec.width + 19] = -1
+
+        raw_candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.35,
+            robot_y=0.45,
+            min_cells=2,
+            min_distance=0.0,
+            max_distance=10.0,
+        )
+        safe_candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.35,
+            robot_y=0.45,
+            min_cells=2,
+            min_distance=0.0,
+            max_distance=10.0,
+            minimum_obstacle_clearance=0.15,
+        )
+
+        self.assertEqual(len(raw_candidates), 1)
+        self.assertEqual(safe_candidates, [])
 
     def test_blacklist_excludes_only_nearby_part_of_cluster(self) -> None:
         spec = GridSpec(width=5, height=5, resolution=0.2)

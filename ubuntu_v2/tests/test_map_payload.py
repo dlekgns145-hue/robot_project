@@ -26,7 +26,7 @@ class ServerMapPayloadTests(unittest.TestCase):
         )
         return image
 
-    def test_server_map_and_fresh_visual_layers_are_encoded(self) -> None:
+    def test_server_map_is_lidar_only_even_if_visual_files_exist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / "orchard_map.pgm"
@@ -56,10 +56,11 @@ class ServerMapPayloadTests(unittest.TestCase):
                 zlib.decompress(base64.b64decode(payload["image_base64"])),
                 image.read_bytes(),
             )
-            self.assertEqual(
-                base64.b64decode(payload["texture_base64"]), b"texture"
-            )
-            self.assertEqual(payload["obstacle_materials"]["dominant"], "metal")
+            self.assertNotIn("texture_base64", payload)
+            self.assertNotIn("obstacle_texture_base64", payload)
+            self.assertNotIn("obstacle_materials", payload)
+            self.assertNotIn("visual_layer_navigation_safe", payload)
+            self.assertEqual(payload["occupancy_source"], "lidar_slam_only")
             self.assertEqual(payload["map_source"], "saved")
             self.assertTrue(payload["navigation_safe"])
 
@@ -67,10 +68,9 @@ class ServerMapPayloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._write_map(root, "orchard_map", origin_x=1.0)
-            live_image = self._write_map(root, "orchard_map_live", origin_x=3.0)
+            self._write_map(root, "orchard_map_live", origin_x=3.0)
             obstacle = root / "orchard_map_live_obstacles.png"
             obstacle.write_bytes(b"live-obstacle")
-            os.utime(obstacle, (live_image.stat().st_mtime + 1.0,) * 2)
             (root / "orchard_map_live_status.json").write_text(
                 json.dumps(
                     {
@@ -87,12 +87,10 @@ class ServerMapPayloadTests(unittest.TestCase):
 
             self.assertEqual(payload["map_source"], "live")
             self.assertEqual(payload["origin_x"], 3.0)
-            self.assertEqual(payload["layer_revision"], 42)
-            self.assertFalse(payload["visual_layer_navigation_safe"])
-            self.assertEqual(
-                base64.b64decode(payload["obstacle_texture_base64"]),
-                b"live-obstacle",
-            )
+            self.assertEqual(payload["map_revision"], 42)
+            self.assertEqual(payload["map_updated_unix"], 100.0)
+            self.assertEqual(payload["occupancy_source"], "lidar_slam_only")
+            self.assertNotIn("obstacle_texture_base64", payload)
 
     def test_stale_or_inactive_live_map_falls_back_to_saved_map(self) -> None:
         for active, updated in ((True, 80.0), (False, 100.0)):

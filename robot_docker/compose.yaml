@@ -142,18 +142,11 @@ services:
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
       ROBOT_MAP_OUTPUT: "${ROBOT_MAP_OUTPUT:-/opt/robot-control/maps/orchard_map}"
-      ROBOT_CAMERA_URL: "${ROBOT_CAMERA_URL:-http://127.0.0.1:8080/stream.mjpg}"
-      ROBOT_TEXTURE_SOURCE_TOP_FRACTION: "${ROBOT_TEXTURE_SOURCE_TOP_FRACTION:-0.50}"
-      ROBOT_TEXTURE_NEAR_M: "${ROBOT_TEXTURE_NEAR_M:-0.18}"
-      ROBOT_TEXTURE_FAR_M: "${ROBOT_TEXTURE_FAR_M:-2.0}"
-      ROBOT_TEXTURE_NEAR_WIDTH_M: "${ROBOT_TEXTURE_NEAR_WIDTH_M:-0.85}"
-      ROBOT_TEXTURE_FAR_WIDTH_M: "${ROBOT_TEXTURE_FAR_WIDTH_M:-1.8}"
       ROBOT_MAPPING_MAXIMUM_RUNTIME: "${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}"
       ROBOT_MAPPING_MAXIMUM_RADIUS: "${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}"
     depends_on:
       - agent
       - base
-      - camera
     volumes:
       - ./maps:/opt/robot-control/maps
 

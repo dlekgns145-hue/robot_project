@@ -80,6 +80,9 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertTrue(
             self.scan_filter.is_self_reflection(math.radians(-150.0), 0.15)
         )
+        self.assertTrue(
+            self.scan_filter.is_self_reflection(math.radians(-168.0), 0.12)
+        )
 
     def test_front_obstacle_is_not_filtered(self) -> None:
         self.assertFalse(self.scan_filter.is_self_reflection(0.0, 0.15))
@@ -87,6 +90,9 @@ class NavigationRecoveryTests(unittest.TestCase):
     def test_distant_return_in_rear_sector_is_not_filtered(self) -> None:
         self.assertFalse(
             self.scan_filter.is_self_reflection(math.radians(-150.0), 0.5)
+        )
+        self.assertFalse(
+            self.scan_filter.is_self_reflection(math.radians(-168.0), 0.5)
         )
 
     def test_slam_range_cap_removes_distant_reflection(self) -> None:
@@ -171,39 +177,37 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn('name="base_footprint_to_base_link"', launch_text)
         self.assertIn("navigation_launch.py", launch_text)
         self.assertIn("autonomous_mapping.py", launch_text)
-        self.assertIn("map_texture_recorder.py", launch_text)
-        self.assertIn("map_texture_core.py", dockerfile_text)
-        self.assertIn("obstacle_texture_fusion.py", dockerfile_text)
-        self.assertIn("calibrate_map_texture.py", dockerfile_text)
-        self.assertIn('LaunchConfiguration("camera_horizontal_fov_deg")', launch_text)
-        self.assertIn('"obstacle_layer_render_period"', launch_text)
-        self.assertIn('"sensor_sync_maximum_skew"', launch_text)
-        self.assertIn("lidar_x_offset_m:=", launch_text)
-        self.assertIn("ROBOT_SENSOR_SYNC_MAXIMUM_SKEW", entrypoint_text)
-        self.assertIn('LaunchConfiguration("texture_far_m")', launch_text)
-        self.assertIn("projection_far_width_m:=", launch_text)
-        odom_command = launch_text.split('f"{runtime_dir}/odom_relay.py"', 1)[1]
-        odom_command, texture_command = odom_command.split(
-            'f"{runtime_dir}/map_texture_recorder.py"', 1
-        )
-        self.assertNotIn("projection_near_m:=", odom_command)
-        self.assertIn("projection_near_m:=", texture_command)
-        self.assertIn("ROBOT_TEXTURE_FAR_M", entrypoint_text)
+        self.assertIn("mapping_core.py", dockerfile_text)
+        self.assertNotIn("map_texture_recorder.py", launch_text)
+        self.assertNotIn("map_texture_core.py", dockerfile_text)
+        self.assertNotIn("obstacle_texture_fusion.py", dockerfile_text)
+        self.assertNotIn("calibrate_map_texture.py", dockerfile_text)
+        self.assertNotIn("camera_obstacle_guard.py", launch_text)
+        self.assertNotIn('package="orchard_mapper"', launch_text)
+        self.assertNotIn("camera_url", launch_text)
         self.assertIn("ROBOT_MAPPING_MAXIMUM_RUNTIME", entrypoint_text)
+        self.assertIn("ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT", entrypoint_text)
+        self.assertIn("ROBOT_MAPPING_MAXIMUM_MAP_AGE", entrypoint_text)
+        self.assertIn("minimum_save_known_area_m2:=", launch_text)
+        self.assertIn("minimum_save_free_area_m2:=", launch_text)
         self.assertIn("maximum_exploration_radius:=", launch_text)
+        self.assertIn(
+            '"planner_server.ros__parameters.GridBased.tolerance": "0.10"',
+            launch_text,
+        )
+        self.assertIn(
+            '"controller_server.ros__parameters.general_goal_checker.xy_goal_tolerance": "0.15"',
+            launch_text,
+        )
+
         self.assertIn("ROBOT_MAPPING_MAXIMUM_RADIUS", compose_text)
-        self.assertIn("ROBOT_TEXTURE_SOURCE_TOP_FRACTION", compose_text)
-        camera_guard_command = launch_text.split(
-            'f"{runtime_dir}/camera_obstacle_guard.py"', 1
-        )[1].split('f"{runtime_dir}/odom_relay.py"', 1)[0]
-        self.assertNotIn("source_top_fraction:=", camera_guard_command)
-        self.assertIn("camera_obstacle_guard.py", launch_text)
-        self.assertIn("IfCondition(camera_guard_enabled)", launch_text)
+        self.assertNotIn("ROBOT_TEXTURE", compose_text)
         self.assertIn("output_topic:=/scan_slam", launch_text)
         self.assertIn("temporal_window:=3", launch_text)
         self.assertIn("maximum_range_m:=4.0", launch_text)
         self.assertIn("RewrittenYaml", launch_text)
-        self.assertIn('{"yaw_goal_tolerance": "3.14"}', launch_text)
+        self.assertIn('"yaw_goal_tolerance": "3.14"', launch_text)
+        self.assertIn('"observation_sources": "scan"', launch_text)
         self.assertIn('default_value="false"', launch_text)
         self.assertIn("scan_topic: /scan_slam", params_text)
         self.assertIn("odom_frame: odom", params_text)
@@ -217,6 +221,18 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("bt_loop_duration: 100", nav_params_text)
         self.assertIn("transform_timeout: 0.05", params_text)
         self.assertIn("throttle_scans: 1", params_text)
+
+    def test_mapping_checks_nav2_path_before_driving_frontier(self) -> None:
+        docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
+        source = (docker_dir / "autonomous_mapping.py").read_text()
+
+        self.assertIn("ComputePathToPose", source)
+        self.assertIn('"/compute_path_to_pose"', source)
+        self.assertIn("def _check_frontier_path", source)
+        self.assertIn("frontier_inaccessible", source)
+        self.assertIn('"maximum_goal_step_distance", 0.35', source)
+        self.assertIn('"failed_goal_blacklist_seconds", 20.0', source)
+        self.assertIn("blacklisted=[]", source)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"

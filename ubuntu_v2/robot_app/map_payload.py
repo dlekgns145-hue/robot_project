@@ -1,4 +1,4 @@
-"""Load server-generated occupancy and camera layers for the desktop GUI."""
+"""Load the LiDAR SLAM occupancy map for remote clients."""
 
 from __future__ import annotations
 
@@ -104,35 +104,12 @@ def load_map_payload(
         "occupied_thresh": float(metadata.get("occupied_thresh", "0.65")),
         "free_thresh": float(metadata.get("free_thresh", "0.25")),
         "map_source": "live" if selected_name != map_name else "saved",
+        "occupancy_source": "lidar_slam_only",
         "navigation_safe": True,
     }
     if live_status:
-        payload["layer_revision"] = int(live_status.get("map_sequence", 0))
-        payload["layer_updated_unix"] = float(live_status["updated_unix"])
-        payload["visual_layer_navigation_safe"] = False
-        payload["occupancy_source"] = str(
-            live_status.get("occupancy_source", "lidar_slam_only")
-        )
-
-    map_mtime = image_path.stat().st_mtime
-    binary_layers = {
-        "texture_base64": root / f"{selected_name}_texture.png",
-        "obstacle_texture_base64": root / f"{selected_name}_obstacles.png",
-    }
-    for key, path in binary_layers.items():
-        if path.is_file() and path.stat().st_mtime >= map_mtime:
-            payload[key] = base64.b64encode(path.read_bytes()).decode("ascii")
-    if "texture_base64" in payload:
-        payload["texture_format"] = "png"
-    if any(key in payload for key in binary_layers):
-        payload["visual_layer_navigation_safe"] = False
-        payload.setdefault("occupancy_source", "lidar_slam_only")
-
-    materials_path = root / f"{selected_name}_materials.json"
-    if materials_path.is_file() and materials_path.stat().st_mtime >= map_mtime:
-        materials = json.loads(materials_path.read_text(encoding="utf-8"))
-        if isinstance(materials, dict):
-            payload["obstacle_materials"] = materials
+        payload["map_revision"] = int(live_status.get("map_sequence", 0))
+        payload["map_updated_unix"] = float(live_status["updated_unix"])
     return payload
 
 
