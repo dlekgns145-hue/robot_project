@@ -27,6 +27,7 @@ robot_cmd_bridge.py - 로봇(Docker 컨테이너) 안에서 실행하는 파일
 
 import ast
 import base64
+import hashlib
 import socket
 import json
 import math
@@ -47,6 +48,8 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Int32, String
 from std_srvs.srv import SetBool, Trigger
 
+from map_bundle import active_navigation_paths, install_navigation_bundle
+
 HOST = "0.0.0.0"
 PORT = 9999
 COMMAND_TIMEOUT = 0.5
@@ -61,6 +64,13 @@ SERVER_DRIVING_ANGULAR_DEADBAND = float(
     os.getenv("SERVER_DRIVING_ANGULAR_DEADBAND", "0.03")
 )
 NAVIGATION_LEASE_TIMEOUT = float(os.getenv("NAVIGATION_LEASE_TIMEOUT_SEC", "2.5"))
+# The goal-accept response for /navigate_to_pose is relayed through the Zenoh
+# bridge to the server's bt_navigator and back. That extra hop has been
+# observed to silently drop the accept response at the RTPS layer (a FastDDS
+# reader-history size mismatch), which left navigation stuck at "Nav2 목표
+# 전송 중" forever with no error and no way to retry from the GUI. Time the
+# "sending" state out instead of waiting on a response that may never come.
+REMOTE_NAV_SEND_TIMEOUT = float(os.getenv("REMOTE_NAV_SEND_TIMEOUT_SEC", "8.0"))
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
 LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
@@ -95,8 +105,9 @@ STUCK_TIMEOUT_SEC = 4.0  # 이 시간 넘게 NORMAL로 못 돌아오면 "갇혔�
 ESCAPE_ANGULAR_SPEED = 0.4  # 탈출 회전 속도
 ESCAPE_TURN_TIME_SEC = 2.5  # 이 시간 동안 LiDAR 무시하고 무조건 회전
 
-# Ground-facing angle verified on the physical robot during the overlay test.
-SERVO_TILT_DEFAULT = -80
+# Raised from the -80 ground-facing angle used for the overlay test; that
+# angle pointed too far down for normal driving/monitoring use.
+SERVO_TILT_DEFAULT = -50
 SERVO_PAN_MIN = -60
 SERVO_PAN_MAX = 60
 
@@ -172,6 +183,7 @@ class CmdBridgeNode(Node):
         self._remote_nav_goal_handle = None
         self._remote_nav_cancel_requested = False
         self._remote_nav_owns_mode = False
+        self._remote_nav_sending_since = 0.0
         self._map_pose = None
         self._mapping_status = {
             "state": "unavailable",
@@ -181,6 +193,7 @@ class CmdBridgeNode(Node):
         }
         self._last_pose_saved_at = 0.0
         self._last_pose_save_error_at = 0.0
+        self._navigation_bundle = self._load_navigation_bundle_status()
 
         self.front_blocked = False
         self.front_min_dist = 10.0
@@ -261,6 +274,29 @@ class CmdBridgeNode(Node):
     def mapping_snapshot(self):
         with self.lock:
             return dict(self._mapping_status)
+
+    @staticmethod
+    def _load_navigation_bundle_status():
+        path = f"{MAP_DIRECTORY}/navigation_bundle_status.json"
+        try:
+            with open(path, "r", encoding="utf-8") as status_file:
+                payload = json.load(status_file)
+            return payload if isinstance(payload, dict) else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def install_corrected_map(self, bundle):
+        with self.lock:
+            mapping_active = bool(self._mapping_status.get("enabled", False))
+            navigation_active = self._remote_nav_active
+        if mapping_active:
+            raise RuntimeError("cannot install a corrected map while mapping is active")
+        if navigation_active:
+            raise RuntimeError("cannot install a corrected map while navigation is active")
+        manifest = install_navigation_bundle(bundle, MAP_DIRECTORY)
+        with self.lock:
+            self._navigation_bundle = dict(manifest)
+        return manifest
 
     def mapping_command(self, command_type: str, timeout: float = 3.0):
         client = self.mapping_clients.get(command_type)
@@ -535,6 +571,7 @@ class CmdBridgeNode(Node):
             return None
 
     def control_loop(self):
+        self._check_remote_nav_send_timeout()
         twist = Twist()
         with self.lock:
             navigation_mode = self.navigation_mode
@@ -731,6 +768,9 @@ class CmdBridgeNode(Node):
                 else dict(self._remote_nav_goal),
                 "distance_remaining": self._remote_nav_distance,
                 "pose": None if self._map_pose is None else dict(self._map_pose),
+                "map_bundle": None
+                if self._navigation_bundle is None
+                else dict(self._navigation_bundle),
             }
 
     def start_navigation(self, x: float, y: float, yaw: float):
@@ -749,6 +789,7 @@ class CmdBridgeNode(Node):
             self._remote_nav_state = "sending"
             self._remote_nav_active = True
             self._remote_nav_message = "Nav2 목표 전송 중"
+            self._remote_nav_sending_since = time.monotonic()
             self._remote_nav_goal = {
                 "x": round(float(x), 4),
                 "y": round(float(y), 4),
@@ -821,6 +862,22 @@ class CmdBridgeNode(Node):
         else:
             self._finish_remote_navigation("failed", f"Navigation 실패 (status={status})")
 
+    def _check_remote_nav_send_timeout(self):
+        with self.lock:
+            if self._remote_nav_state != "sending":
+                return
+            elapsed = time.monotonic() - self._remote_nav_sending_since
+            if elapsed <= REMOTE_NAV_SEND_TIMEOUT:
+                return
+        self.get_logger().error(
+            f"Nav2 목표 응답이 {REMOTE_NAV_SEND_TIMEOUT:.0f}초 넘게 오지 않음 "
+            "(게이트웨이/Zenoh 브릿지 확인 필요)"
+        )
+        self._finish_remote_navigation(
+            "error",
+            f"Nav2 목표 응답 시간 초과 ({REMOTE_NAV_SEND_TIMEOUT:.0f}초) - 다시 시도해 주세요",
+        )
+
     def _finish_remote_navigation(self, state: str, message: str):
         with self.lock:
             owns_mode = self._remote_nav_owns_mode
@@ -849,9 +906,23 @@ class CmdBridgeNode(Node):
             goal_handle.cancel_goal_async()
         return True
 
-    def load_map_payload(self):
-        image_path = f"{MAP_DIRECTORY}/{MAP_NAME}.pgm"
-        yaml_path = f"{MAP_DIRECTORY}/{MAP_NAME}.yaml"
+    def load_map_payload(self, variant="active"):
+        active_paths = None
+        if variant != "raw":
+            try:
+                active_paths = active_navigation_paths(MAP_DIRECTORY)
+            except ValueError:
+                active_paths = None
+        if active_paths is None:
+            image_path = f"{MAP_DIRECTORY}/{MAP_NAME}.pgm"
+            yaml_path = f"{MAP_DIRECTORY}/{MAP_NAME}.yaml"
+            pose_path = f"{MAP_DIRECTORY}/{MAP_NAME}_pose.json"
+            occupancy_source = "lidar_slam_only"
+        else:
+            yaml_path = str(active_paths[0])
+            pose_path = str(active_paths[1])
+            image_path = str(active_paths[0].with_name("map.pgm"))
+            occupancy_source = "lidar_slam_server_postprocessed"
         with open(image_path, "rb") as image_file:
             image_data = image_file.read()
         metadata = {}
@@ -888,9 +959,23 @@ class CmdBridgeNode(Node):
             "negate": int(metadata.get("negate", "0")),
             "occupied_thresh": float(metadata.get("occupied_thresh", "0.65")),
             "free_thresh": float(metadata.get("free_thresh", "0.25")),
-            "occupancy_source": "lidar_slam_only",
+            "occupancy_source": occupancy_source,
             "navigation_safe": True,
         }
+        try:
+            with open(pose_path, "r", encoding="utf-8") as pose_file:
+                robot_pose = json.load(pose_file)
+            if active_paths is None:
+                expected_digest = str(robot_pose.get("map_sha256") or "")
+                if hashlib.sha256(image_data).hexdigest() != expected_digest:
+                    raise ValueError("saved mapping pose belongs to a different PGM")
+            payload["robot_pose"] = {
+                "x": float(robot_pose["x"]),
+                "y": float(robot_pose["y"]),
+                "yaw": float(robot_pose["yaw"]),
+            }
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
         return payload
 
     def _fill_with_desired(self, twist: Twist):
@@ -933,10 +1018,12 @@ def start_socket_server(node: CmdBridgeNode):
         buffer = ""
         try:
             while True:
-                data = conn.recv(1024)
+                data = conn.recv(65_536)
                 if not data:
                     break
                 buffer += data.decode("utf-8")
+                if len(buffer) > 32 * 1024 * 1024:
+                    raise ValueError("command buffer exceeded 32 MiB")
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
@@ -945,7 +1032,13 @@ def start_socket_server(node: CmdBridgeNode):
                     try:
                         cmd = json.loads(line)
                         response = handle_socket_command(node, cmd)
-                    except (json.JSONDecodeError, TypeError, ValueError, OSError) as error:
+                    except (
+                        json.JSONDecodeError,
+                        TypeError,
+                        ValueError,
+                        RuntimeError,
+                        OSError,
+                    ) as error:
                         response = {"ok": False, "error": str(error)}
                     conn.sendall(
                         json.dumps(response, separators=(",", ":")).encode("utf-8")
@@ -967,7 +1060,15 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
     elif command_type == "navigation_cancel":
         node.cancel_navigation()
     elif command_type == "map_request":
-        response["map"] = node.load_map_payload()
+        response["map"] = node.load_map_payload(str(cmd.get("map_variant", "active")))
+    elif command_type == "map_install":
+        manifest = node.install_corrected_map(cmd.get("bundle"))
+        response["map_install"] = {
+            "installed": True,
+            "job_id": manifest["job_id"],
+            "corrected_sha256": manifest["corrected_sha256"],
+            "message": "corrected map and transformed pose installed for navigation",
+        }
     elif command_type in {
         "mapping_start",
         "mapping_stop",

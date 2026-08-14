@@ -99,6 +99,12 @@ services:
     environment:
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
+      # Keep the command bridge on the image-default FastDDS implementation.
+      # With ROS_LOCALHOST_ONLY=1, CycloneDDS disables multicast on loopback
+      # and the bridge cannot discover mapping-runtime in another container.
+      # The image-wide DYNAMIC_REUSABLE FastDDS profile now handles the
+      # variable-size Zenoh action responses that originally motivated the
+      # CycloneDDS override.
       SERVER_COMMAND_TIMEOUT_SEC: "0.5"
       SERVER_MAX_LINEAR_SPEED: "0.12"
       SERVER_MAX_ANGULAR_SPEED: "0.18"
@@ -142,8 +148,8 @@ services:
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
       ROBOT_MAP_OUTPUT: "${ROBOT_MAP_OUTPUT:-/opt/robot-control/maps/orchard_map}"
-      ROBOT_MAPPING_MAXIMUM_RUNTIME: "${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}"
-      ROBOT_MAPPING_MAXIMUM_RADIUS: "${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}"
+      ROBOT_MAPPING_MAXIMUM_RUNTIME: "${ROBOT_MAPPING_MAXIMUM_RUNTIME:-1800.0}"
+      ROBOT_MAPPING_MAXIMUM_RADIUS: "${ROBOT_MAPPING_MAXIMUM_RADIUS:-12.0}"
     depends_on:
       - agent
       - base

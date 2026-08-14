@@ -173,6 +173,31 @@ class FrontierCoreTests(unittest.TestCase):
         goal_index = candidates[0].grid_y * spec.width + candidates[0].grid_x
         self.assertEqual(data[goal_index], 0)
 
+    def test_physical_mapping_stage_leaves_meaningful_travel_after_tolerance(self) -> None:
+        spec = GridSpec(width=45, height=5, resolution=0.05)
+        data = [100] * (spec.width * spec.height)
+        for x in range(1, 44):
+            data[2 * spec.width + x] = 0
+        data[2 * spec.width + 44] = -1
+
+        candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.125,
+            robot_y=0.125,
+            min_cells=1,
+            min_distance=0.45,
+            max_distance=7.0,
+            goal_standoff=0.35,
+            maximum_goal_step_distance=0.75,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertGreaterEqual(candidates[0].distance, 0.70)
+        # Mapping overrides Nav2's xy tolerance to 0.15 m. The staged goal
+        # must still demand substantially more than a tiny startup movement.
+        self.assertGreater(candidates[0].distance - 0.15, 0.50)
+
     def test_frontier_beyond_goal_limit_uses_bounded_staged_goal(self) -> None:
         spec = GridSpec(width=40, height=5, resolution=0.1)
         data = [-1] * (spec.width * spec.height)
@@ -296,6 +321,64 @@ class FrontierCoreTests(unittest.TestCase):
                 alternatives[0].y - initial[0].y,
             ),
             0.1,
+        )
+
+    def test_blacklist_uses_frontier_location_not_shared_staged_goal(self) -> None:
+        spec = GridSpec(width=11, height=11, resolution=0.1)
+        data = [-1] * (spec.width * spec.height)
+        # A corridor has two distant gray boundaries, but their first staged
+        # goals are close enough that a staged-goal blacklist would hide both.
+        for coordinate in range(2, 9):
+            data[5 * spec.width + coordinate] = 0
+            data[4 * spec.width + coordinate] = 100
+            data[6 * spec.width + coordinate] = 100
+
+        initial = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.55,
+            robot_y=0.55,
+            min_cells=1,
+            min_distance=0.0,
+            max_distance=10.0,
+            maximum_goal_step_distance=0.2,
+        )
+        self.assertEqual(len(initial), 2)
+
+        alternatives = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.55,
+            robot_y=0.55,
+            min_cells=1,
+            min_distance=0.0,
+            max_distance=10.0,
+            maximum_goal_step_distance=0.2,
+            blacklisted=[(initial[0].frontier_x, initial[0].frontier_y)],
+            blacklist_radius=0.25,
+        )
+
+        self.assertEqual(len(alternatives), 1)
+
+        blocked_route = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.55,
+            robot_y=0.55,
+            min_cells=1,
+            min_distance=0.0,
+            max_distance=10.0,
+            maximum_goal_step_distance=0.2,
+            staged_blacklisted=[(initial[0].x, initial[0].y)],
+            staged_blacklist_radius=0.15,
+        )
+        self.assertEqual(len(blocked_route), 1)
+        self.assertGreater(
+            math.hypot(
+                blocked_route[0].x - initial[0].x,
+                blocked_route[0].y - initial[0].y,
+            ),
+            0.15,
         )
 
     def test_invalid_grid_size_is_rejected(self) -> None:

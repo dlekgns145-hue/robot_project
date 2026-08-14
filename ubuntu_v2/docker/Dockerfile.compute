@@ -21,6 +21,7 @@ RUN ros_source_files="$(grep -RIl 'packages\.ros\.org/ros2/ubuntu' \
         ros-humble-navigation2 \
         ros-humble-nav2-bringup \
         ros-humble-slam-toolbox \
+        ros-humble-rmw-cyclonedds-cpp \
     && apt-get clean
 
 WORKDIR /opt/robot-control
@@ -35,10 +36,12 @@ COPY robot_docker/navigation_runtime_launch.py \
      robot_docker/prepare_navigation_params.py \
      robot_docker/scan_diagnostics.py \
      robot_docker/odom_relay.py \
+     robot_docker/cmd_vel_relay.py \
      robot_docker/scan_time_fix.py \
      robot_docker/autonomous_mapping.py \
      robot_docker/frontier_core.py \
      robot_docker/mapping_core.py \
+     robot_docker/map_bundle.py \
      robot_docker/camera_obstacle_guard.py \
      /opt/robot-control/navigation/
 COPY robot_docker/recovered/Broom.yaml \
@@ -46,10 +49,19 @@ COPY robot_docker/recovered/Broom.yaml \
      robot_docker/recovered/dwb_nav_params_fixed.yaml \
      robot_docker/mapping_slam_params.yaml \
      /opt/robot-control/navigation/
+COPY ubuntu_v2/robot_app/map_postprocess.py \
+     /opt/robot-control/navigation/map_postprocess.py
 
 RUN chmod 0755 /opt/robot-control/entrypoint.sh \
     /opt/robot-control/navigation/*.py \
     && mkdir -p /opt/robot-control/maps
+
+# Match the robot image: included Nav2 nodes must use the isolated TF graph
+# selected by mapping_runtime_launch.py/navigation_runtime_launch.py.
+RUN sed -i "s|'/tf', 'tf'|'/tf', '/tf_nav'|g" \
+    /opt/ros/humble/share/nav2_bringup/launch/bringup_launch.py \
+    /opt/ros/humble/share/nav2_bringup/launch/localization_launch.py \
+    /opt/ros/humble/share/nav2_bringup/launch/navigation_launch.py
 
 ENTRYPOINT ["/opt/robot-control/entrypoint.sh"]
 CMD ["mapping-server"]

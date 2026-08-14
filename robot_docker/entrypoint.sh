@@ -42,15 +42,31 @@ case "${1:-}" in
     mapping|mapping-server)
         exec ros2 launch /opt/robot-control/navigation/mapping_runtime_launch.py \
             map_output:="${ROBOT_MAP_OUTPUT:-/opt/robot-control/maps/orchard_map}" \
-            mapping_maximum_runtime:="${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}" \
-            mapping_maximum_radius:="${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}" \
-            mapping_goal_progress_timeout:="${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-55.0}" \
+            mapping_maximum_runtime:="${ROBOT_MAPPING_MAXIMUM_RUNTIME:-1800.0}" \
+            mapping_maximum_radius:="${ROBOT_MAPPING_MAXIMUM_RADIUS:-12.0}" \
+            mapping_goal_progress_timeout:="${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-25.0}" \
             mapping_maximum_map_age:="${ROBOT_MAPPING_MAXIMUM_MAP_AGE:-8.0}" \
             mapping_minimum_save_known_area:="${ROBOT_MAPPING_MINIMUM_SAVE_KNOWN_AREA:-1.0}" \
             mapping_minimum_save_free_area:="${ROBOT_MAPPING_MINIMUM_SAVE_FREE_AREA:-0.5}"
         ;;
+    map-postprocessor)
+        exec python3 /opt/robot-control/navigation/map_postprocess.py \
+            --root "${MAP_DIRECTORY:-/opt/robot-control/maps}" \
+            --poll-seconds "${MAP_POSTPROCESS_POLL_SECONDS:-2.0}"
+        ;;
     navigation)
-        map_yaml="${ROBOT_MAP_YAML:-/opt/robot-control/maps/orchard_map.yaml}"
+        corrected_map="/opt/robot-control/maps/navigation-current/map.yaml"
+        corrected_pose="/opt/robot-control/maps/navigation-current/pose.json"
+        if [[ -n "${ROBOT_MAP_YAML:-}" ]]; then
+            map_yaml="${ROBOT_MAP_YAML}"
+            pose_json="${ROBOT_POSE_JSON:-/opt/robot-control/maps/last_pose.json}"
+        elif [[ -r "${corrected_map}" && -r "${corrected_pose}" ]]; then
+            map_yaml="${corrected_map}"
+            pose_json="${corrected_pose}"
+        else
+            map_yaml="/opt/robot-control/maps/orchard_map.yaml"
+            pose_json="/opt/robot-control/maps/last_pose.json"
+        fi
         params_template="/opt/robot-control/navigation/dwb_nav_params_fixed.yaml"
         runtime_params="/tmp/dwb_nav_params_runtime.yaml"
         if [[ ! -r "${map_yaml}" ]]; then
@@ -59,14 +75,14 @@ case "${1:-}" in
         fi
         python3 /opt/robot-control/navigation/prepare_navigation_params.py \
             --template "${params_template}" \
-            --pose /opt/robot-control/maps/last_pose.json \
+            --pose "${pose_json}" \
             --output "${runtime_params}"
         exec ros2 launch /opt/robot-control/navigation/navigation_runtime_launch.py \
             map:="${map_yaml}" \
             params_file:="${runtime_params}"
         ;;
     *)
-        echo "usage: entrypoint.sh {bringup|base|bridge|camera|camera-safety|mapping|mapping-server|navigation}" >&2
+        echo "usage: entrypoint.sh {bringup|base|bridge|camera|camera-safety|mapping|mapping-server|map-postprocessor|navigation}" >&2
         exit 2
         ;;
 esac

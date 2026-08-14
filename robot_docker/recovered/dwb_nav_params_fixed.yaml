@@ -165,7 +165,7 @@ controller_server:
       # The dedicated BackUp recovery behavior remains available separately.
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.08
+      max_vel_x: 0.12
       max_vel_y: 0.0
       max_vel_theta: 0.18
       min_speed_xy: 0.02
@@ -378,7 +378,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.08, 0.0, 0.18]
+    max_velocity: [0.12, 0.0, 0.18]
     min_velocity: [-0.06, 0.0, -0.18]
     max_accel: [0.3, 0.0, 0.5]
     max_decel: [-0.3, 0.0, -0.5]

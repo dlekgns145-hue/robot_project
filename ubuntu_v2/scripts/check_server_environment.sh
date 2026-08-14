@@ -5,8 +5,7 @@ INSTALL_DIR="${ROBOT_SERVER_DIR:-/opt/robot-control-server}"
 COMPOSE_DIR="${INSTALL_DIR}/ubuntu_v2"
 REQUIRED_CONTAINERS=(
     robot-v2-gateway
-    robot-v2-ros-transport
-    robot-v2-compute-mapping
+    robot-v2-map-postprocessor
 )
 failures=0
 
@@ -76,19 +75,15 @@ if [[ -n "${robot_ip}" ]]; then
     ip route get "${robot_ip}" 2>&1 | head -n 1
 fi
 
-section "sensor readiness"
-if docker ps --format '{{.Names}}' | grep -qx robot-v2-compute-mapping; then
-    topics="$(docker exec robot-v2-compute-mapping bash -lc \
-        'source /opt/ros/humble/setup.bash && ros2 topic list' 2>/dev/null || true)"
-    for topic in /scan /odom_raw /tf_nav /map; do
-        if grep -qx "${topic}" <<<"${topics}"; then
-            printf 'SEEN %-28s topic exists (confirm live rate with robot on)\n' "${topic}"
-        else
-            printf 'WAIT %-28s not visible\n' "${topic}"
-        fi
-    done
+section "map post-processing"
+map_root="${COMPOSE_DIR}/maps"
+install -d "${map_root}/postprocess-inbox" "${map_root}/raw" "${map_root}/corrected"
+printf 'map root:  %s\n' "${map_root}"
+printf 'queued:    %s\n' "$(find "${map_root}/postprocess-inbox" -maxdepth 1 -name '*.json' | wc -l)"
+if [[ -f "${map_root}/orchard_map_postprocess.json" ]]; then
+    printf 'READY corrected orchard_map and report exist\n'
 else
-    printf 'WAIT compute container is not running\n'
+    printf 'WAIT no completed robot map has been post-processed yet\n'
 fi
 
 section "result"
@@ -96,5 +91,5 @@ if (( failures > 0 )); then
     printf 'PRECHECK FAILED: %d critical check(s) failed.\n' "${failures}"
     exit 1
 fi
-printf 'PRECHECK OK: boot services and compute containers are ready.\n'
-printf 'Sensor WAIT lines are expected while the robot is off.\n'
+printf 'PRECHECK OK: gateway and map post-processor are ready.\n'
+printf 'A map WAIT line is expected until the next completed mapping run.\n'

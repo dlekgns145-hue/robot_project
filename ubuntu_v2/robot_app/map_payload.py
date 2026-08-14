@@ -91,6 +91,8 @@ def load_map_payload(
     live_max_age: float = 8.0,
 ) -> dict[str, Any]:
     root = Path(directory)
+    if (root / f".{map_name}.processing").exists():
+        raise ValueError("corrected server map is being promoted")
     selected_name, live_status = _select_map_name(
         root,
         map_name,
@@ -121,6 +123,23 @@ def load_map_payload(
         "occupancy_source": "lidar_slam_only",
         "navigation_safe": True,
     }
+    report_path = root / f"{map_name}_postprocess.json"
+    if selected_name == map_name and report_path.is_file():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            payload["occupancy_source"] = "lidar_slam_server_postprocessed"
+            payload["postprocess"] = {
+                "algorithm": report.get("algorithm"),
+                "job_id": report.get("job_id"),
+                "processed_unix": report.get("processed_unix"),
+                "wall_angle_correction_deg": report.get(
+                    "wall_angle_correction_deg"
+                ),
+                "connected_wall_pixels": report.get("connected_wall_pixels"),
+                "removed_noise_pixels": report.get("removed_noise_pixels"),
+            }
+        except (OSError, ValueError, TypeError):
+            pass
     if live_status:
         payload["map_revision"] = int(live_status.get("map_sequence", 0))
         payload["map_updated_unix"] = float(live_status["updated_unix"])

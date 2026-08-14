@@ -13,13 +13,16 @@ class ServerImageTests(unittest.TestCase):
         self.assertIn("22.04|24.04|26.04", installer)
         self.assertIn('SOURCE_DIR="${SCRIPT_DIR}"', installer)
         self.assertIn('SOURCE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"', installer)
-        self.assertIn("docker compose --profile compute build gateway compute-mapping", installer)
+        self.assertIn(
+            "docker compose --profile compute build gateway map-postprocessor",
+            installer,
+        )
         self.assertIn("systemctl enable robot-control-server.service", installer)
         self.assertIn("systemctl restart robot-control-server.service", installer)
         self.assertIn('chown root:docker "${ENV_FILE}"', installer)
         self.assertIn('chmod 0640 "${ENV_FILE}"', installer)
 
-    def test_server_service_starts_the_complete_compute_stack(self):
+    def test_server_service_starts_pi_local_mapping_and_postprocess_stack(self):
         service = (
             ROOT / "ubuntu_v2" / "systemd" / "robot-control-server.service"
         ).read_text()
@@ -30,14 +33,23 @@ class ServerImageTests(unittest.TestCase):
             ROOT / "ubuntu_v2" / "scripts" / "run_compute_mapping.sh"
         ).read_text()
         self.assertIn(
-            "--profile compute up -d gateway ros-transport compute-mapping", runner
+            "--profile compute up -d gateway map-postprocessor", runner
         )
-        self.assertIn("/navigation_scan_filter", runner)
-        self.assertIn("docker restart robot-v2-ros-transport", runner)
+        self.assertIn("stop compute-mapping ros-transport", runner)
 
     def test_gateway_image_contains_server_map_payload_module(self):
         dockerfile = (ROOT / "ubuntu_v2" / "docker" / "Dockerfile.gateway").read_text()
         self.assertIn("robot_app/map_payload.py", dockerfile)
+        self.assertIn("robot_app/map_inbox.py", dockerfile)
+
+    def test_compute_image_contains_server_map_postprocessor(self):
+        dockerfile = (ROOT / "ubuntu_v2" / "docker" / "Dockerfile.compute").read_text()
+        compose = (ROOT / "ubuntu_v2" / "compose.yaml").read_text()
+        self.assertIn("ubuntu_v2/robot_app/map_postprocess.py", dockerfile)
+        self.assertIn("robot_docker/map_bundle.py", dockerfile)
+        self.assertIn("map-postprocessor:", compose)
+        self.assertIn('command: ["map-postprocessor"]', compose)
+        self.assertIn("network_mode: none", compose)
 
     def test_compute_image_uses_reachable_ros_mirror(self):
         dockerfile = (ROOT / "ubuntu_v2" / "docker" / "Dockerfile.compute").read_text()
@@ -101,6 +113,7 @@ class ServerImageTests(unittest.TestCase):
         self.assertIn("robot-control-server-images.tar", builder)
         self.assertNotIn('"${PROJECT_DIR}/orchard_mapper/."', builder)
         self.assertIn('"${PROJECT_DIR}/robot_docker/mapping_core.py"', builder)
+        self.assertIn('"${PROJECT_DIR}/robot_docker/map_bundle.py"', builder)
         self.assertIn("COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata", builder)
 
     def test_installer_omits_visual_mapping_build_context(self):
@@ -108,6 +121,17 @@ class ServerImageTests(unittest.TestCase):
         self.assertNotIn('"${SOURCE_DIR}/orchard_mapper/."', installer)
         self.assertNotIn('"${INSTALL_DIR}/orchard_mapper/"', installer)
         self.assertNotIn("map_texture_recorder.py", installer)
+        self.assertIn('"${SOURCE_DIR}/robot_docker/map_bundle.py"', installer)
+
+    def test_robot_navigation_uses_atomic_corrected_map_and_pose_pair(self):
+        dockerfile = (ROOT / "robot_docker" / "Dockerfile").read_text()
+        entrypoint = (ROOT / "robot_docker" / "entrypoint.sh").read_text()
+        self.assertIn(
+            "COPY robot_cmd_bridge.py map_bundle.py /opt/robot-control/",
+            dockerfile,
+        )
+        self.assertIn("navigation-current/map.yaml", entrypoint)
+        self.assertIn("navigation-current/pose.json", entrypoint)
 
 
 if __name__ == "__main__":

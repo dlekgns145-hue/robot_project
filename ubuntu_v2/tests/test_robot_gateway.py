@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import sys
+import base64
 import json
 import socket
+import tempfile
 import threading
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +17,7 @@ sys.path.insert(0, str(APP_DIR))
 
 import robot_gateway  # noqa: E402
 from robot_gateway import RobotRelay, legacy_payload  # noqa: E402
+from map_inbox import MapInbox  # noqa: E402
 from robot_locator import (  # noqa: E402
     Resolution,
     RobotLocator,
@@ -153,6 +157,117 @@ class GatewayProtocolTests(unittest.TestCase):
 
         self.assertEqual(connection.payloads, [b'{"heartbeat":1}\n'])
 
+    def test_gui_traffic_also_triggers_completed_map_handoff(self) -> None:
+        mapping = {
+            "state": "stopped",
+            "enabled": False,
+            "saved_map": "/maps/orchard_map",
+            "save_sequence": 1,
+        }
+
+        class RecordingConnection:
+            def sendall(self, _payload: bytes) -> None:
+                pass
+
+            def recv(self, _size: int) -> bytes:
+                return (json.dumps({"ok": True, "mapping": mapping}) + "\n").encode()
+
+        relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+        relay.connection = RecordingConnection()  # type: ignore[assignment]
+        with (
+            patch.object(relay, "_stage_completed_map") as stage,
+            patch.object(relay, "_deliver_pending_corrected_map") as deliver,
+        ):
+            self.assertTrue(relay.send({"heartbeat": 1}))
+
+        stage.assert_called_once_with(mapping)
+        deliver.assert_called_once_with()
+
+    def test_completed_robot_map_is_fetched_once_and_queued_on_server(self) -> None:
+        image = b"P5\n3 2\n255\n" + bytes([0, 205, 254, 254, 0, 205])
+        payload = {
+            "image_base64": base64.b64encode(zlib.compress(image)).decode(),
+            "image_encoding": "zlib+base64",
+            "width": 3,
+            "height": 2,
+            "resolution": 0.05,
+            "origin_x": 0.0,
+            "origin_y": 0.0,
+            "origin_yaw": 0.0,
+        }
+
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.payloads: list[bytes] = []
+
+            def sendall(self, command: bytes) -> None:
+                self.payloads.append(command)
+
+            def recv(self, _size: int) -> bytes:
+                return (json.dumps({"ok": True, "map": payload}) + "\n").encode()
+
+        with tempfile.TemporaryDirectory() as directory:
+            relay = RobotRelay(
+                RobotLocator(robot_ip="127.0.0.1"),
+                map_inbox=MapInbox(directory),
+            )
+            connection = RecordingConnection()
+            relay.connection = connection  # type: ignore[assignment]
+            mapping = {
+                "state": "completed",
+                "enabled": False,
+                "saved_map": "/maps/orchard_map",
+                "save_sequence": 1,
+                "map_sequence": 99,
+                "map_quality": {"known_area_m2": 12.5},
+            }
+
+            relay._stage_completed_map(mapping)
+            relay._stage_completed_map(mapping)
+
+            self.assertEqual(
+                connection.payloads,
+                [b'{"type":"map_request","map_variant":"raw"}\n'],
+            )
+            self.assertEqual(
+                len(list((Path(directory) / "postprocess-inbox").glob("*.json"))),
+                1,
+            )
+            self.assertEqual(relay.status(True)["map_postprocess"]["state"], "queued")
+
+    def test_corrected_map_outbox_is_returned_to_robot_and_marked_delivered(self) -> None:
+        class InstallConnection:
+            def __init__(self) -> None:
+                self.payloads: list[dict] = []
+
+            def sendall(self, command: bytes) -> None:
+                self.payloads.append(json.loads(command))
+
+            def recv(self, _size: int) -> bytes:
+                return b'{"ok":true,"map_install":{"installed":true,"job_id":"job-7"}}\n'
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outbox = root / "postprocess-outbox"
+            outbox.mkdir()
+            (outbox / "job-7.json").write_text(
+                json.dumps({"job_id": "job-7", "navigation_safe": True})
+            )
+            relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+            relay._map_root = root
+            connection = InstallConnection()
+            relay.connection = connection  # type: ignore[assignment]
+
+            relay._deliver_pending_corrected_map()
+
+            self.assertEqual(connection.payloads[0]["type"], "map_install")
+            self.assertEqual(connection.payloads[0]["bundle"]["job_id"], "job-7")
+            self.assertTrue((root / "postprocess-delivered/job-7.json").is_file())
+            self.assertEqual(
+                relay.status(True)["map_postprocess"]["state"],
+                "installed_on_robot",
+            )
+
     def test_gui_disconnect_releases_manual_control_without_emergency(self) -> None:
         class RecordingConnection:
             def __init__(self) -> None:
@@ -215,4 +330,3 @@ class GatewayProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

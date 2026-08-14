@@ -159,8 +159,10 @@ cp -a \
     "${SOURCE_DIR}/robot_docker/scan_diagnostics.py" \
     "${SOURCE_DIR}/robot_docker/odom_relay.py" \
     "${SOURCE_DIR}/robot_docker/scan_time_fix.py" \
+    "${SOURCE_DIR}/robot_docker/cmd_vel_relay.py" \
     "${SOURCE_DIR}/robot_docker/autonomous_mapping.py" \
     "${SOURCE_DIR}/robot_docker/frontier_core.py" \
+    "${SOURCE_DIR}/robot_docker/map_bundle.py" \
     "${SOURCE_DIR}/robot_docker/camera_obstacle_guard.py" \
     "${SOURCE_DIR}/robot_docker/mapping_slam_params.yaml" \
     "${INSTALL_DIR}/robot_docker/"
@@ -225,8 +227,7 @@ fi
 cd "${INSTALL_DIR}/ubuntu_v2"
 docker compose --profile compute config >/dev/null
 if [[ "${HAS_BUNDLED_IMAGES}" != "true" ]]; then
-    docker compose --profile compute pull ros-transport
-    docker compose --profile compute build gateway compute-mapping
+    docker compose --profile compute build gateway map-postprocessor
 fi
 
 install -m 0644 \
@@ -249,4 +250,4 @@ echo "  Service:        robot-control-server.service"
 echo "  Maps:           ${INSTALL_DIR}/ubuntu_v2/maps"
 echo "  GUI token:      sudo sed -n 's/^COMMAND_TOKEN=//p' ${ENV_FILE}"
 echo
-echo "Mapping compute is running in an idle-safe state. Start exploration from the GUI."
+echo "Pi-local mapping and Ubuntu post-processing are ready. Start exploration from the GUI."

@@ -19,34 +19,32 @@ Windows/macOS GUI
   - 수동/Follow 명령
         │ TCP 9999 (고정 대상: Ubuntu VM)
         ▼
-Ubuntu VM Docker: gateway + compute-mapping
+Ubuntu VM Docker: gateway + map-postprocessor
   - GUI 토큰 검증
   - 로봇 Wi-Fi MAC → 현재 DHCP IP 탐색
-  - LiDAR SLAM, Nav2, 프런티어 탐색
-  - Nav2 표준 PGM/YAML 점유 지도 저장
+  - 완료된 PGM/YAML 원본을 한 번만 수신·보존
+  - 노이즈 제거, 벽 각도 보정, 짧은 벽 끊김 연결
+  - 검증된 보정 지도만 원자적으로 승격
+  - 저장 시점 로봇 자세를 같은 좌표변환으로 보정해 Pi로 반환
   - UTM NAT에서는 GUI가 해석한 raspberrypi.local IP를 보조 전달
   - IP 변경/연결 끊김 시 자동 재탐색
         │ TCP 9999 (현재 로봇 IP로 자동 연결)
         ▼
 실물 로봇 Raspberry Pi
   - micro-ROS Agent/base_node_X3와 센서 수집
+  - LiDAR SLAM, Nav2, 프런티어 탐색 및 원본 지도 저장
   - 카메라 저상 장애물 감시
   - /cmd_vel_server 명령 임대·속도 제한·LiDAR 안전 검사
   - 최종 /cmd_vel, 서보 및 모터
 ```
 
-센서 데이터는 ROS 2 DDS로 Ubuntu 서버에 전달되고 서버는
-`/cmd_vel_server`만 반환합니다. 이 명령은 최종 모터 명령이 아닙니다.
+기본 매핑에서는 센서 데이터나 중간 지도 이미지를 Ubuntu로 보내지 않습니다.
+Pi에서 SLAM과 탐색을 끝내고 지도 저장 검증이 성공한 뒤에만 압축된 PGM/YAML
+한 쌍을 gateway가 가져옵니다.
 로봇의 `robot_cmd_bridge.py`가 0.5초 유효시간, LiDAR 최신성, 카메라 저상
 장애물을 모두 통과시킨 경우에만 실제 `/cmd_vel`로 전달합니다. Wi-Fi나 서버가
 끊기면 로봇이 서버와 독립적으로 정지합니다.
 
-UTM은 `Shared Network`를 사용합니다. DDS 멀티캐스트는 NAT를 통과하지 않으므로
-로봇과 서버의 `zenoh-bridge-ros2dds`가 허용 목록에 지정한 원시 센서와 원격 제어
-토픽·서비스·액션만 전용 TCP 7448 하나로 전달합니다. DDS는 각 장치의 localhost에만
-묶이며, 서버에서 가공한 지도·TF·오도메트리는 로봇으로 되돌아가지 않습니다.
-한 로봇에는 연산 서버 한 대만 이 포트로 연결해야 합니다. 이전 서버를 동시에
-연결하면 센서와 `/cmd_vel` 발행자가 중복되므로 새 서버 전환 시 포트를 분리합니다.
 GUI는 Mac의 `127.0.0.1:9999` 포워딩으로 gateway에 접속합니다.
 
 서버 연산 런타임 실행:
@@ -58,9 +56,24 @@ cp -n .env.example .env
 ./scripts/run_compute_mapping.sh
 ```
 
-`compute-mapping`은 시작 직후 센서와 Nav2만 준비하고 로봇을 움직이지 않습니다.
-GUI의 `자동 매핑 시작` 확인을 거쳐야 탐색을 시작합니다. 결과 지도는 서버의
-`ubuntu_v2/maps`에 저장되며 gateway가 GUI로 반환합니다.
+`map-postprocessor`는 네트워크가 차단된 서버 컨테이너입니다. GUI의 `자동 매핑
+시작`은 TCP gateway를 통해 Pi의 로컬 매핑 런타임에 전달됩니다. 완료본은
+`ubuntu_v2/maps/raw`에 보존되고, 보정 스냅샷은 `maps/corrected`, 최종 지도와
+처리 보고서·전후 비교 이미지는 `maps/orchard_map*`에 저장됩니다.
+
+Pi는 원본 PGM의 SHA-256과 `map -> base_footprint` 자세를 같이 저장합니다.
+서버가 지도를 회전·크롭하면 동일한 3×3 affine 변환을 `x, y, yaw`에도
+적용하고, 보정 PGM/YAML과 변환된 자세를 하나의 버전 묶음으로 Pi에
+돌려보냅니다. Pi는 검증·체크섬 확인 후 `maps/navigation-current`
+심볼릭 링크를 원자적으로 교체하므로, 다음 Navigation 런타임은 정확히
+같은 버전의 지도와 AMCL 초기 자세를 불러옵니다. 로봇을 지도 저장 후
+물리적으로 옮겼다면 이 초기 자세는 유효하지 않으므로 Navigation 시작 전
+재위치 지정이 필요합니다.
+
+후처리는 고립된 작은 노이즈와 작은 분리 조각만 제거하고, 여러 Hough 선분이
+동의할 때만 전역 벽 각도를 최대 ±12° 보정합니다. 벽 연결 한계는 기본 0.20m라서
+일반적인 문이나 통로를 임의로 닫지 않습니다. 알려진/주행 가능 영역이 과도하게
+줄거나 장애물 면적이 비정상적으로 늘면 보정본을 거부하고 기존 지도를 유지합니다.
 
 ### 지도 생성 안전 조건
 

@@ -111,6 +111,40 @@ class ServerMapPayloadTests(unittest.TestCase):
                     self.assertEqual(payload["map_source"], "saved")
                     self.assertEqual(payload["origin_x"], 1.0)
 
+    def test_corrected_server_map_exposes_postprocess_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_map(root, "orchard_map", origin_x=1.0)
+            (root / "orchard_map_postprocess.json").write_text(
+                json.dumps(
+                    {
+                        "algorithm": "occupancy-clean-align-connect-v1",
+                        "job_id": "map-123",
+                        "processed_unix": 123.0,
+                        "wall_angle_correction_deg": -3.5,
+                        "connected_wall_pixels": 8,
+                        "removed_noise_pixels": 4,
+                    }
+                )
+            )
+
+            payload = load_map_payload(directory)
+
+            self.assertEqual(
+                payload["occupancy_source"],
+                "lidar_slam_server_postprocessed",
+            )
+            self.assertEqual(payload["postprocess"]["job_id"], "map-123")
+
+    def test_map_is_not_served_during_pair_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_map(root, "orchard_map")
+            (root / ".orchard_map.processing").write_text("job")
+
+            with self.assertRaisesRegex(ValueError, "being promoted"):
+                load_map_payload(directory)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,8 +26,11 @@ Nav2 액션 서버(`/navigate_to_pose`)를 통해 로봇을 자율적으로 이�
 from __future__ import annotations
 
 import json
+import hashlib
 import math
+import os
 from dataclasses import asdict
+from pathlib import Path
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -35,12 +38,14 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav2_msgs.srv import SaveMap
 from nav_msgs.msg import OccupancyGrid
+from nav_msgs.srv import GetMap
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from std_msgs.msg import Bool, String
+from slam_toolbox.srv import DeserializePoseGraph, SerializePoseGraph
+from std_msgs.msg import Bool, String, UInt16
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -73,16 +78,22 @@ class AutonomousMappingNode(Node):
         # Allow Nav2's progress checker and recovery tree to finish a bounded
         # spin/backup cycle before the frontier goal is cancelled.
         self.declare_parameter("goal_timeout", 120.0)
-        self.declare_parameter("goal_progress_timeout", 55.0)
+        # Classroom chair and desk legs can leave a valid-looking frontier
+        # path that makes no physical progress. Switch regions promptly instead
+        # of waiting almost a minute at each blocked aisle.
+        self.declare_parameter("goal_progress_timeout", 25.0)
         self.declare_parameter("goal_progress_minimum_delta", 0.10)
         self.declare_parameter("goal_cancel_timeout", 8.0)
-        self.declare_parameter("goal_retry_delay", 3.0)
+        self.declare_parameter("goal_retry_delay", 1.0)
         self.declare_parameter("frontier_plan_timeout", 8.0)
         self.declare_parameter("maximum_consecutive_goal_failures", 5)
         self.declare_parameter("maximum_map_age", 8.0)
         self.declare_parameter("maximum_pose_age", 2.0)
-        self.declare_parameter("minimum_runtime", 60.0)
-        self.declare_parameter("minimum_completion_travel_distance", 1.0)
+        # A resumed, malformed map previously satisfied the old 60 s / 1 m
+        # completion gate after only a few short stages. Full mapping must
+        # demonstrate sustained exploration before it can auto-save as done.
+        self.declare_parameter("minimum_runtime", 180.0)
+        self.declare_parameter("minimum_completion_travel_distance", 5.0)
         self.declare_parameter("maximum_runtime", 1800.0)
         self.declare_parameter("completion_stable_maps", 5)
         self.declare_parameter("minimum_frontier_length", 0.35)
@@ -90,18 +101,32 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("minimum_completion_goal_distance", 0.20)
         self.declare_parameter("minimum_goal_distance", 0.45)
         self.declare_parameter("maximum_goal_distance", 7.0)
-        self.declare_parameter("maximum_goal_step_distance", 0.35)
+        # Short 0.35 m stages left only about 0.15 m outside Nav2's goal
+        # tolerance. On the physical base that was too little commanded travel
+        # to overcome startup friction reliably, so the same nearby corridor
+        # failed five times without exposing meaningful new scan area.
+        self.declare_parameter("maximum_goal_step_distance", 0.75)
         self.declare_parameter("frontier_goal_standoff", 0.35)
         self.declare_parameter("minimum_goal_obstacle_clearance", 0.28)
         self.declare_parameter("maximum_robot_free_seed_distance", 0.50)
         self.declare_parameter("maximum_exploration_radius", 25.0)
         self.declare_parameter("blacklist_radius", 0.7)
-        self.declare_parameter("failed_goal_blacklist_seconds", 20.0)
-        self.declare_parameter("reached_goal_blacklist_seconds", 6.0)
+        self.declare_parameter("staged_goal_blacklist_radius", 0.35)
+        # One Nav2 progress attempt can last 55 seconds. A 20 second blacklist
+        # let the same blocked approach become eligible almost immediately;
+        # retain it long enough to force exploration of another direction.
+        self.declare_parameter("failed_goal_blacklist_seconds", 120.0)
+        # Reaching a gray boundary means that region has already received an
+        # exploration attempt. Keep it out of the destination set for the rest
+        # of this run; paths to genuinely new frontiers may still cross it.
+        self.declare_parameter("reached_goal_blacklist_seconds", 1800.0)
         self.declare_parameter("minimum_start_known_area_m2", 0.25)
         self.declare_parameter("minimum_save_known_area_m2", 1.0)
         self.declare_parameter("minimum_save_free_area_m2", 0.50)
         self.declare_parameter("map_output", "/opt/robot-control/maps/orchard_map")
+        self.declare_parameter("minimum_battery_percent", 25)
+        self.declare_parameter("maximum_battery_age", 10.0)
+        self.declare_parameter("resume_pose_graph", True)
 
         self.map_frame = str(self.get_parameter("map_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
@@ -112,6 +137,12 @@ class AutonomousMappingNode(Node):
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.map_subscription = self.create_subscription(
             OccupancyGrid, map_topic, self._on_map, map_qos
+        )
+        self.map_refresh_subscription = self.create_subscription(
+            OccupancyGrid,
+            "/autonomous_mapping/map_refresh",
+            self._on_map,
+            10,
         )
         status_qos = QoSProfile(depth=1)
         status_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -128,6 +159,16 @@ class AutonomousMappingNode(Node):
             self, ComputePathToPose, "/compute_path_to_pose"
         )
         self.map_saver = self.create_client(SaveMap, "/map_saver/save_map")
+        # Some FastDDS runs deliver SLAM's map to Nav2 but not to this Python
+        # subscriber. The service exposes the same current OccupancyGrid and
+        # provides a deterministic fallback.
+        self.dynamic_map = self.create_client(GetMap, "/slam_toolbox/dynamic_map")
+        self.pose_graph_saver = self.create_client(
+            SerializePoseGraph, "/slam_toolbox/serialize_map"
+        )
+        self.pose_graph_loader = self.create_client(
+            DeserializePoseGraph, "/slam_toolbox/deserialize_map"
+        )
         self.navigation_lease_publisher = self.create_publisher(
             Bool, "/cmd_bridge/navigation_lease", 10
         )
@@ -135,6 +176,15 @@ class AutonomousMappingNode(Node):
             Bool,
             "/cmd_bridge/emergency_stop",
             self._on_emergency_stop,
+            10,
+        )
+        self.battery_subscription = self.create_subscription(
+            UInt16, "/battery", self._on_battery, 10
+        )
+        self.battery_refresh_subscription = self.create_subscription(
+            UInt16,
+            "/autonomous_mapping/battery_refresh",
+            self._on_battery,
             10,
         )
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
@@ -152,6 +202,9 @@ class AutonomousMappingNode(Node):
         self.latest_map: OccupancyGrid | None = None
         self.latest_map_quality: MapQuality | None = None
         self.last_map_received_at = 0.0
+        self.map_request_future = None
+        self.latest_battery_percent: int | None = None
+        self.last_battery_received_at = 0.0
         self.map_sequence = 0
         self.last_empty_map_sequence = -1
         self.empty_map_count = 0
@@ -180,17 +233,32 @@ class AutonomousMappingNode(Node):
         self.consecutive_goal_failures = 0
         self.distance_remaining = None
         self.blacklist: list[tuple[float, float, float, bool]] = []
+        self.staged_blacklist: list[tuple[float, float, float]] = []
         self.travel_distance = 0.0
         self.last_travel_pose: tuple[float, float] | None = None
         self.save_pending = False
         self.save_requested_reason = ""
         self.saving_map_output = ""
         self.saving_staging_output = ""
+        self.saving_robot_pose = None
         self.save_attempt_sequence = 0
         self.last_save_error = ""
         self.saved_map = ""
+        self.saved_pose = None
         self.save_sequence = 0
+        self.pose_graph_save_requested = False
+        self.pose_graph_save_pending = False
+        self.pose_graph_save_sequence = 0
+        self.pose_graph_staging_base = ""
+        self.pose_graph_saved = False
+        self.pose_graph_last_error = ""
+        self.pose_graph_next_retry_at = 0.0
+        self.pose_graph_resume_future = None
+        self.pose_graph_resumed = False
+        self.pose_graph_resume_state = self._initial_pose_graph_resume_state()
         self.status_message = "autonomous mapping ready; waiting for start"
+        self.map_refresh_timer = self.create_timer(1.0, self._refresh_map)
+        self.pose_graph_timer = self.create_timer(0.5, self._maintain_pose_graph)
         self._publish_status(self.status_message)
 
     def _seconds(self) -> float:
@@ -211,7 +279,181 @@ class AutonomousMappingNode(Node):
             self.latest_map_quality = None
             self.get_logger().error(f"invalid occupancy grid: {error}")
 
-    def _robot_pose(self) -> tuple[float, float]:
+    def _on_battery(self, message: UInt16) -> None:
+        self.latest_battery_percent = max(0, min(100, int(message.data)))
+        self.last_battery_received_at = self._seconds()
+
+    def _pose_graph_base(self) -> Path:
+        return Path(f"{self.get_parameter('map_output').value}_slam")
+
+    def _pose_graph_files(self, base: Path | None = None) -> tuple[Path, Path]:
+        graph_base = self._pose_graph_base() if base is None else base
+        return Path(f"{graph_base}.posegraph"), Path(f"{graph_base}.data")
+
+    def _initial_pose_graph_resume_state(self) -> str:
+        if not bool(self.get_parameter("resume_pose_graph").value):
+            return "disabled"
+        graph_path, data_path = self._pose_graph_files()
+        pose_path = Path(f"{self.get_parameter('map_output').value}_pose.json")
+        try:
+            if all(
+                path.is_file() and path.stat().st_size > 0
+                for path in (graph_path, data_path, pose_path)
+            ):
+                return "pending"
+        except OSError as error:
+            self.pose_graph_last_error = f"pose graph files could not be inspected: {error}"
+            return "failed"
+        return "not_available"
+
+    def _maintain_pose_graph(self) -> None:
+        if self.pose_graph_resume_state == "pending":
+            self._request_pose_graph_resume()
+        if (
+            self.pose_graph_save_requested
+            and not self.pose_graph_save_pending
+            and self._seconds() >= self.pose_graph_next_retry_at
+        ):
+            self._request_pose_graph_save()
+
+    def _request_pose_graph_resume(self) -> None:
+        if self.pose_graph_resume_future is not None:
+            return
+        if not self.pose_graph_loader.service_is_ready():
+            return
+        pose_path = Path(f"{self.get_parameter('map_output').value}_pose.json")
+        try:
+            pose = json.loads(pose_path.read_text(encoding="utf-8"))
+            request = DeserializePoseGraph.Request()
+            request.filename = str(self._pose_graph_base())
+            request.match_type = DeserializePoseGraph.Request.START_AT_GIVEN_POSE
+            request.initial_pose.x = float(pose["x"])
+            request.initial_pose.y = float(pose["y"])
+            request.initial_pose.theta = float(pose["yaw"])
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            self.pose_graph_resume_state = "failed"
+            self.pose_graph_last_error = f"pose graph resume metadata invalid: {error}"
+            self._publish_status(self.pose_graph_last_error)
+            return
+        self.latest_map = None
+        self.latest_map_quality = None
+        self.last_map_received_at = 0.0
+        self.pose_graph_resume_state = "loading"
+        try:
+            future = self.pose_graph_loader.call_async(request)
+        except Exception as error:
+            self.pose_graph_resume_state = "failed"
+            self.pose_graph_last_error = f"pose graph resume request failed: {error}"
+            self._publish_status(self.pose_graph_last_error)
+            return
+        self.pose_graph_resume_future = future
+        future.add_done_callback(self._on_pose_graph_resumed)
+
+    def _on_pose_graph_resumed(self, future) -> None:
+        self.pose_graph_resume_future = None
+        try:
+            future.result()
+        except Exception as error:
+            self.pose_graph_resume_state = "failed"
+            self.pose_graph_last_error = f"pose graph resume failed: {error}"
+            self._publish_status(self.pose_graph_last_error)
+            return
+        self.pose_graph_resumed = True
+        self.pose_graph_resume_state = "resumed"
+        self.pose_graph_last_error = ""
+        self._publish_status("saved SLAM pose graph resumed; waiting for start")
+
+    def _request_pose_graph_save(self) -> None:
+        if not self.pose_graph_saver.service_is_ready():
+            self.pose_graph_last_error = "pose graph saver service is not ready"
+            self.pose_graph_next_retry_at = self._seconds() + 2.0
+            return
+        self.pose_graph_save_sequence += 1
+        stable_base = self._pose_graph_base()
+        staging_base = stable_base.with_name(
+            f".{stable_base.name}.pending-{self.pose_graph_save_sequence}-{os.getpid()}"
+        )
+        for path in self._pose_graph_files(staging_base):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        request = SerializePoseGraph.Request()
+        request.filename = str(staging_base)
+        self.pose_graph_save_pending = True
+        self.pose_graph_staging_base = str(staging_base)
+        try:
+            future = self.pose_graph_saver.call_async(request)
+        except Exception as error:
+            self.pose_graph_save_pending = False
+            self.pose_graph_last_error = f"pose graph save request failed: {error}"
+            self.pose_graph_next_retry_at = self._seconds() + 2.0
+            return
+        future.add_done_callback(self._on_pose_graph_saved)
+
+    def _on_pose_graph_saved(self, future) -> None:
+        self.pose_graph_save_pending = False
+        staging_base = Path(self.pose_graph_staging_base)
+        staging_files = self._pose_graph_files(staging_base)
+        try:
+            response = future.result()
+            if int(response.result) != int(SerializePoseGraph.Response.RESULT_SUCCESS):
+                raise ValueError(f"slam_toolbox result={int(response.result)}")
+            if not all(path.is_file() and path.stat().st_size > 0 for path in staging_files):
+                raise ValueError("slam_toolbox did not create both pose graph files")
+            stable_files = self._pose_graph_files()
+            for source, destination in zip(staging_files, stable_files):
+                os.replace(source, destination)
+            manifest = {
+                "schema_version": 1,
+                "saved_unix": self._seconds(),
+                "posegraph_sha256": hashlib.sha256(stable_files[0].read_bytes()).hexdigest(),
+                "data_sha256": hashlib.sha256(stable_files[1].read_bytes()).hexdigest(),
+            }
+            manifest_path = Path(f"{self._pose_graph_base()}_manifest.json")
+            temporary = manifest_path.with_name(f".{manifest_path.name}.tmp-{os.getpid()}")
+            temporary.write_text(json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8")
+            os.replace(temporary, manifest_path)
+        except Exception as error:
+            for path in staging_files:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            self.pose_graph_last_error = f"pose graph save failed: {error}"
+            self.pose_graph_next_retry_at = self._seconds() + 2.0
+            self._publish_status(self.pose_graph_last_error)
+            return
+        self.pose_graph_save_requested = False
+        self.pose_graph_saved = True
+        self.pose_graph_last_error = ""
+        self._publish_status("map and resumable SLAM pose graph saved")
+
+    def _refresh_map(self) -> None:
+        """Fetch SLAM's current grid if the DDS map stream is absent or stale."""
+        if self.last_map_received_at > 0.0 and self._map_age() < 2.0:
+            return
+        if self.map_request_future is not None:
+            return
+        if not self.dynamic_map.service_is_ready():
+            return
+        future = self.dynamic_map.call_async(GetMap.Request())
+        self.map_request_future = future
+        future.add_done_callback(self._on_dynamic_map)
+
+    def _on_dynamic_map(self, future) -> None:
+        self.map_request_future = None
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warn(f"dynamic map request failed: {error}")
+            return
+        message = response.map
+        if int(message.info.width) <= 0 or int(message.info.height) <= 0:
+            return
+        self._on_map(message)
+
+    def _robot_pose_full(self) -> tuple[float, float, float]:
         transform = self.tf_buffer.lookup_transform(
             self.map_frame, self.base_frame, Time(), timeout=Duration(seconds=0.2)
         )
@@ -225,7 +467,16 @@ class AutonomousMappingNode(Node):
                 f"({pose_age:.2f} s)"
             )
         translation = transform.transform.translation
-        return float(translation.x), float(translation.y)
+        rotation = transform.transform.rotation
+        yaw = math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        )
+        return float(translation.x), float(translation.y), float(yaw)
+
+    def _robot_pose(self) -> tuple[float, float]:
+        x, y, _yaw = self._robot_pose_full()
+        return x, y
 
     def _map_age(self, now: float | None = None) -> float:
         if self.last_map_received_at <= 0.0:
@@ -236,6 +487,28 @@ class AutonomousMappingNode(Node):
         errors: list[str] = []
         if self.save_pending:
             errors.append("a map save is still in progress")
+        if self.pose_graph_resume_state in {"pending", "loading"}:
+            errors.append("saved SLAM pose graph is still loading")
+        elif self.pose_graph_resume_state == "failed":
+            errors.append(self.pose_graph_last_error or "saved SLAM pose graph could not be loaded")
+        maximum_battery_age = float(
+            self.get_parameter("maximum_battery_age").value
+        )
+        battery_age = (
+            float("inf")
+            if self.last_battery_received_at <= 0.0
+            else self._seconds() - self.last_battery_received_at
+        )
+        if self.latest_battery_percent is None or (
+            maximum_battery_age > 0.0 and battery_age > maximum_battery_age
+        ):
+            errors.append("a fresh battery reading is unavailable")
+        elif self.latest_battery_percent <= int(
+            self.get_parameter("minimum_battery_percent").value
+        ):
+            errors.append(
+                f"battery is too low ({self.latest_battery_percent}%)"
+            )
         if self.latest_map is None or self.latest_map_quality is None:
             errors.append("a valid occupancy grid has not arrived")
         else:
@@ -325,6 +598,7 @@ class AutonomousMappingNode(Node):
         self.active_frontier_count = 0
         self.reachable_frontier_count = 0
         self.blacklist.clear()
+        self.staged_blacklist.clear()
         self.goal_cancel_pending = False
         self.goal_cancel_requested_at = 0.0
         self.goal_cancel_reason = ""
@@ -339,6 +613,7 @@ class AutonomousMappingNode(Node):
         self.travel_distance = 0.0
         self.last_travel_pose = self.start_pose
         self.saved_map = ""
+        self.saved_pose = None
         response.success = True
         response.message = "autonomous mapping started"
         self._publish_status(response.message)
@@ -444,9 +719,26 @@ class AutonomousMappingNode(Node):
         self._set_navigation_mode(False)
         self._publish_status(reason)
 
-    def _prune_blacklist(self, now: float) -> list[tuple[float, float]]:
+    def _prune_blacklist(
+        self, now: float
+    ) -> tuple[
+        list[tuple[float, float]],
+        list[tuple[float, float]],
+        list[tuple[float, float]],
+    ]:
         self.blacklist = [entry for entry in self.blacklist if entry[2] > now]
-        return [(entry[0], entry[1]) for entry in self.blacklist]
+        self.staged_blacklist = [
+            entry for entry in self.staged_blacklist if entry[2] > now
+        ]
+        return (
+            [(entry[0], entry[1]) for entry in self.blacklist],
+            [(entry[0], entry[1]) for entry in self.staged_blacklist],
+            [
+                (entry[0], entry[1])
+                for entry in self.blacklist
+                if not entry[3]
+            ],
+        )
 
     def _cancel_active_goal(self, reason: str) -> None:
         if self.goal_handle is None or self.goal_cancel_pending:
@@ -499,13 +791,18 @@ class AutonomousMappingNode(Node):
             )
         start_x, start_y = self.start_pose or (robot_x, robot_y)
         max_radius = float(self.get_parameter("maximum_exploration_radius").value)
-        active_blacklist = self._prune_blacklist(self._seconds())
+        (
+            active_blacklist,
+            active_staged_blacklist,
+            active_reached_blacklist,
+        ) = self._prune_blacklist(self._seconds())
 
         def search(
             *,
             min_cells: int,
             min_distance: float,
             blacklisted: list[tuple[float, float]],
+            staged_blacklisted: list[tuple[float, float]],
         ):
             found = frontier_candidates(
                 self.latest_map.data,
@@ -520,6 +817,10 @@ class AutonomousMappingNode(Node):
                 blacklisted=blacklisted,
                 blacklist_radius=float(
                     self.get_parameter("blacklist_radius").value
+                ),
+                staged_blacklisted=staged_blacklisted,
+                staged_blacklist_radius=float(
+                    self.get_parameter("staged_goal_blacklist_radius").value
                 ),
                 goal_standoff=float(
                     self.get_parameter("frontier_goal_standoff").value
@@ -548,6 +849,7 @@ class AutonomousMappingNode(Node):
             min_cells=normal_min_cells,
             min_distance=float(self.get_parameter("minimum_goal_distance").value),
             blacklisted=active_blacklist,
+            staged_blacklisted=active_staged_blacklist,
         )
 
         # Completion uses a more sensitive search than ordinary goal scoring.
@@ -565,17 +867,20 @@ class AutonomousMappingNode(Node):
         reachable_candidates = search(
             min_cells=completion_min_cells,
             min_distance=completion_min_distance,
-            # A planning failure can be temporary when the robot is standing
-            # in an inflated-cost cell or the costmap is still settling. Keep
-            # every geometrically traversable gray boundary as a completion
-            # blocker and retry it after the blacklist cooldown.
-            blacklisted=[],
+            # Failed plans remain completion blockers because costmaps can
+            # settle. Reached boundaries do not: they were already explored
+            # and must not become destinations again. frontier_candidates
+            # compares this list only with the final frontier coordinate, so
+            # a path to new space may still traverse the old region.
+            blacklisted=active_reached_blacklist,
+            staged_blacklisted=[],
         )
         if not candidates:
             candidates = search(
                 min_cells=completion_min_cells,
                 min_distance=completion_min_distance,
                 blacklisted=active_blacklist,
+                staged_blacklisted=active_staged_blacklist,
             )
 
         self.active_frontier_count = len(candidates)
@@ -589,6 +894,19 @@ class AutonomousMappingNode(Node):
         if not self.enabled:
             return
         now = self._seconds()
+        minimum_battery = int(
+            self.get_parameter("minimum_battery_percent").value
+        )
+        if (
+            self.latest_battery_percent is not None
+            and self.latest_battery_percent <= minimum_battery
+        ):
+            battery = self.latest_battery_percent
+            self._stop_exploration(
+                f"battery reached safety threshold ({battery}% <= {minimum_battery}%)"
+            )
+            self._request_map_save("saving partial map before low-battery shutdown")
+            return
         elapsed = now - self.started_at
         maximum_runtime = float(self.get_parameter("maximum_runtime").value)
         if maximum_runtime > 0.0 and elapsed >= maximum_runtime:
@@ -709,9 +1027,20 @@ class AutonomousMappingNode(Node):
             self.last_empty_map_sequence = -1
             self.state = "waiting_for_frontier_retry"
             retry_seconds = 0.0
-            if self.blacklist:
+            failed_frontier_expiries = [
+                entry[2] for entry in self.blacklist if entry[3]
+            ]
+            if failed_frontier_expiries:
                 retry_seconds = max(
-                    0.0, min(entry[2] for entry in self.blacklist) - now
+                    0.0, min(failed_frontier_expiries) - now
+                )
+            if self.staged_blacklist:
+                retry_seconds = min(
+                    retry_seconds or float("inf"),
+                    max(
+                        0.0,
+                        min(entry[2] for entry in self.staged_blacklist) - now,
+                    ),
                 )
             self._publish_status(
                 f"{len(reachable_candidates)} reachable frontier(s) remain; "
@@ -962,8 +1291,10 @@ class AutonomousMappingNode(Node):
         )
         expires = self._seconds() + float(self.get_parameter(lifetime_name).value)
         self.blacklist.append(
-            (candidate.x, candidate.y, expires, failed)
+            (candidate.frontier_x, candidate.frontier_y, expires, failed)
         )
+        if failed:
+            self.staged_blacklist.append((candidate.x, candidate.y, expires))
 
     def _blacklist_current(self, failed: bool) -> None:
         if self.goal_candidate is None:
@@ -1066,6 +1397,14 @@ class AutonomousMappingNode(Node):
         self.save_pending = True
         self.saving_map_output = map_output
         self.saving_staging_output = staging_output
+        try:
+            x, y, yaw = self._robot_pose_full()
+            self.saving_robot_pose = {"x": x, "y": y, "yaw": yaw}
+        except TransformException as error:
+            self.saving_robot_pose = None
+            self.get_logger().warn(
+                f"map will be saved without a robot pose: {error}"
+            )
         self._publish_status(reason)
         try:
             future = self.map_saver.call_async(request)
@@ -1105,8 +1444,46 @@ class AutonomousMappingNode(Node):
 
         self.last_save_error = ""
         self.saved_map = self.saving_map_output
+        self.saved_pose = self._persist_saved_mapping_pose(
+            self.saving_map_output,
+            self.saving_robot_pose,
+        )
         self.save_sequence += 1
+        self.pose_graph_save_requested = True
+        self.pose_graph_saved = False
+        self._request_pose_graph_save()
         self._publish_status(f"map saved and validated: {self.saving_map_output}")
+
+    def _persist_saved_mapping_pose(self, map_output: str, pose):
+        """Bind the final SLAM pose to the exact raw PGM checksum."""
+
+        if not isinstance(pose, dict):
+            return None
+        image_path = Path(f"{map_output}.pgm")
+        pose_path = Path(f"{map_output}_pose.json")
+        try:
+            image_sha256 = hashlib.sha256(image_path.read_bytes()).hexdigest()
+            payload = {
+                "schema_version": 1,
+                "map_sha256": image_sha256,
+                "frame_id": self.map_frame,
+                "x": round(float(pose["x"]), 6),
+                "y": round(float(pose["y"]), 6),
+                "yaw": round(float(pose["yaw"]), 6),
+                "saved_unix": self._seconds(),
+            }
+            temporary = pose_path.with_name(
+                f".{pose_path.name}.tmp-{os.getpid()}"
+            )
+            temporary.write_text(
+                json.dumps(payload, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, pose_path)
+            return payload
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            self.get_logger().warn(f"saved-map robot pose could not be persisted: {error}")
+            return None
 
     def _publish_periodic_status(self) -> None:
         if self.enabled:
@@ -1125,8 +1502,18 @@ class AutonomousMappingNode(Node):
             "reachable_frontier_count": self.reachable_frontier_count,
             "distance_remaining": self.distance_remaining,
             "saved_map": self.saved_map,
+            "saved_pose": self.saved_pose,
             "save_sequence": self.save_sequence,
             "save_pending": self.save_pending,
+            "battery_percent": self.latest_battery_percent,
+            "minimum_battery_percent": int(
+                self.get_parameter("minimum_battery_percent").value
+            ),
+            "pose_graph_resume_state": self.pose_graph_resume_state,
+            "pose_graph_resumed": self.pose_graph_resumed,
+            "pose_graph_save_pending": self.pose_graph_save_pending,
+            "pose_graph_saved": self.pose_graph_saved,
+            "pose_graph_error": self.pose_graph_last_error or None,
             "travel_distance": round(self.travel_distance, 3),
             "consecutive_goal_failures": self.consecutive_goal_failures,
             "goal_cancel_pending": self.goal_cancel_pending,

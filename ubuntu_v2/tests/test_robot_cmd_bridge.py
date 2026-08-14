@@ -128,6 +128,8 @@ class CommandLeaseTests(unittest.TestCase):
         node.rear_min_dist = 10.0
         node._last_camera_scan_at = 0.0
         node.camera_front_min_dist = float("inf")
+        node._remote_nav_state = "idle"
+        node._remote_nav_sending_since = 0.0
         return node
 
     def test_stale_command_publishes_one_stop_then_releases_topic(self) -> None:

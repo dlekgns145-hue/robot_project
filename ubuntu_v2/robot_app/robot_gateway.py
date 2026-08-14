@@ -10,9 +10,11 @@ import signal
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from config import env_float, env_int
+from map_inbox import MapInbox
 from map_payload import load_configured_map_payload
 from operations_store import OperationsStore
 from robot_locator import Resolution, RobotLocator
@@ -34,6 +36,8 @@ OPERATIONS_DB_PATH = os.getenv(
     "OPERATIONS_DB_PATH", "/var/lib/robot-control-v2/operations.sqlite3"
 )
 ROBOT_NAME = os.getenv("ROBOT_NAME", "Yahboom Robot 1")
+MAP_DIRECTORY = os.getenv("MAP_DIRECTORY", "/opt/robot-control/maps")
+MAP_NAME = os.getenv("MAP_NAME", "orchard_map")
 
 STOP_EVENT = threading.Event()
 
@@ -92,10 +96,14 @@ def legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 class RobotRelay:
     def __init__(
-        self, locator: RobotLocator, operations: OperationsStore | None = None
+        self,
+        locator: RobotLocator,
+        operations: OperationsStore | None = None,
+        map_inbox: MapInbox | None = None,
     ) -> None:
         self.locator = locator
         self.operations = operations
+        self.map_inbox = map_inbox
         self.lock = threading.Lock()
         self.connection: socket.socket | None = None
         self.resolution: Resolution | None = None
@@ -105,6 +113,14 @@ class RobotRelay:
         self.applied_angular = 0.0
         self._response_buffer = bytearray()
         self._robot_response: dict[str, Any] = {}
+        self._last_map_transfer_key = ""
+        self._last_map_transfer_attempt_key = ""
+        self._next_map_transfer_attempt_at = 0.0
+        self._map_transfer_status: dict[str, Any] = {
+            "state": "idle",
+            "message": "waiting for a completed robot map",
+        }
+        self._map_root = Path(MAP_DIRECTORY)
         self._shutdown_event = threading.Event()
         self._reconnect_event = threading.Event()
         self._worker = threading.Thread(target=self._connection_loop, daemon=True)
@@ -198,6 +214,7 @@ class RobotRelay:
         """Keep availability tracking alive without moving the robot."""
         error: OSError | None = None
         ip = ""
+        mapping_snapshot: dict[str, Any] | None = None
         with self.lock:
             if self.connection is None:
                 return
@@ -208,12 +225,14 @@ class RobotRelay:
                 # lease. New robot bridges ignore this marker; older bridges
                 # safely interpret the missing velocities as zero.
                 self._exchange_unlocked({"heartbeat": 1})
+                mapping = self._robot_response.get("mapping")
+                if isinstance(mapping, dict):
+                    mapping_snapshot = dict(mapping)
                 if self.operations is not None:
                     resolution = self.resolution
                     self.operations.set_robot_state(
                         True, ip="" if resolution is None else resolution.ip
                     )
-                return
             except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as caught:
                 error = caught
                 ip = "" if self.resolution is None else self.resolution.ip
@@ -223,10 +242,132 @@ class RobotRelay:
                 self._reconnect_event.set()
                 self.applied_linear = 0.0
                 self.applied_angular = 0.0
+        if error is None:
+            if mapping_snapshot is not None:
+                self._stage_completed_map(mapping_snapshot)
+            self._deliver_pending_corrected_map()
+            return
         if error is not None and self.operations is not None:
             self.operations.set_robot_state(
                 False, ip=ip, detail=f"heartbeat lost: {error}"
             )
+
+    def _stage_completed_map(self, mapping: dict[str, Any]) -> None:
+        """Fetch one stable map pair after mapping has stopped and saved."""
+
+        if self.map_inbox is None:
+            return
+        if bool(mapping.get("enabled", False)):
+            return
+        saved_map = str(mapping.get("saved_map") or "")
+        save_sequence = int(mapping.get("save_sequence", 0))
+        state = str(mapping.get("state") or "")
+        saved_signal = bool(saved_map and save_sequence > 0)
+        persisted_map_probe = state in {"idle", "stopped", "completed"}
+        if not saved_signal and not persisted_map_probe:
+            return
+        transfer_key = (
+            json.dumps(
+                {
+                    "saved_map": saved_map,
+                    "save_sequence": save_sequence,
+                    "map_sequence": int(mapping.get("map_sequence", 0)),
+                    "known_area_m2": (mapping.get("map_quality") or {}).get(
+                        "known_area_m2"
+                    ),
+                },
+                sort_keys=True,
+            )
+            if saved_signal
+            else "persisted-map-probe"
+        )
+        if transfer_key == self._last_map_transfer_key:
+            return
+        now = time.monotonic()
+        if (
+            transfer_key == self._last_map_transfer_attempt_key
+            and now < self._next_map_transfer_attempt_at
+        ):
+            return
+        self._last_map_transfer_attempt_key = transfer_key
+        self._next_map_transfer_attempt_at = now + 15.0
+        try:
+            with self.lock:
+                if self.connection is None:
+                    return
+                response = self._exchange_unlocked(
+                    {"type": "map_request", "map_variant": "raw"}
+                )
+            map_payload = response.get("map")
+            if not isinstance(map_payload, dict):
+                raise ValueError("robot did not return its completed map")
+            job_id = self.map_inbox.stage(map_payload, mapping)
+            self._last_map_transfer_key = transfer_key
+            self._next_map_transfer_attempt_at = 0.0
+            self._map_transfer_status = {
+                "state": "duplicate" if job_id is None else "queued",
+                "message": (
+                    "completed map already exists on the server"
+                    if job_id is None
+                    else "completed map queued for Ubuntu post-processing"
+                ),
+                "job_id": job_id,
+            }
+            print(self._map_transfer_status["message"], flush=True)
+        except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as error:
+            # A post-processing transfer failure must not turn into a motor or
+            # robot-connectivity failure. The next heartbeat retries it.
+            self._map_transfer_status = {
+                "state": "retrying",
+                "message": str(error),
+            }
+            print(f"completed map transfer deferred: {error}", flush=True)
+
+    def _deliver_pending_corrected_map(self) -> None:
+        outbox = self._map_root / "postprocess-outbox"
+        pending = sorted(outbox.glob("*.json"))
+        if not pending:
+            return
+        bundle_path = pending[0]
+        try:
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            if not isinstance(bundle, dict):
+                raise ValueError("corrected map outbox item is not an object")
+            with self.lock:
+                if self.connection is None:
+                    return
+                response = self._exchange_unlocked(
+                    {"type": "map_install", "bundle": bundle}
+                )
+            installed = response.get("map_install")
+            if not isinstance(installed, dict) or not bool(
+                installed.get("installed", False)
+            ):
+                raise ValueError("robot did not acknowledge corrected map installation")
+            delivered = self._map_root / "postprocess-delivered"
+            delivered.mkdir(parents=True, exist_ok=True)
+            os.replace(bundle_path, delivered / bundle_path.name)
+            self._map_transfer_status = {
+                "state": "installed_on_robot",
+                "message": (
+                    "corrected map and transformed pose installed; "
+                    "start the navigation runtime to use this exact bundle"
+                ),
+                "job_id": str(installed.get("job_id") or bundle.get("job_id") or ""),
+            }
+            print(self._map_transfer_status["message"], flush=True)
+        except CommandRejectedError as error:
+            self._map_transfer_status = {
+                "state": "return_retrying",
+                "message": str(error),
+                "job_id": bundle_path.stem,
+            }
+        except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as error:
+            self._map_transfer_status = {
+                "state": "return_retrying",
+                "message": str(error),
+                "job_id": bundle_path.stem,
+            }
 
     def _exchange_unlocked(self, command: dict[str, Any]) -> dict[str, Any]:
         if self.connection is None:
@@ -262,6 +403,7 @@ class RobotRelay:
         return response
 
     def send(self, command: dict[str, Any]) -> bool:
+        mapping_snapshot: dict[str, Any] | None = None
         with self.lock:
             if self.connection is None:
                 self._reconnect_event.set()
@@ -270,10 +412,12 @@ class RobotRelay:
                 return False
             try:
                 self._exchange_unlocked(command)
+                mapping = self._robot_response.get("mapping")
+                if isinstance(mapping, dict):
+                    mapping_snapshot = dict(mapping)
                 self.applied_linear = float(command.get("linear", 0.0))
                 self.applied_angular = float(command.get("angular", 0.0))
                 self.last_error = ""
-                return True
             except CommandRejectedError as error:
                 self.last_error = str(error)
                 self.applied_linear = 0.0
@@ -295,6 +439,16 @@ class RobotRelay:
                         detail=f"command connection lost: {error}",
                     )
                 return False
+
+        # Active GUIs send commands more frequently than the idle heartbeat.
+        # Process map handoff after every successful robot exchange so GUI
+        # traffic cannot indefinitely suppress completed-map upload or the
+        # corrected bundle's return trip. Keep this outside the relay lock:
+        # both helpers perform their own robot exchange.
+        if mapping_snapshot is not None:
+            self._stage_completed_map(mapping_snapshot)
+        self._deliver_pending_corrected_map()
+        return True
 
     def safe_stop(self) -> None:
         with self.lock:
@@ -373,6 +527,7 @@ class RobotRelay:
             command_result = self._robot_response.get("command_result")
             if isinstance(command_result, dict):
                 status["command_result"] = dict(command_result)
+            status["map_postprocess"] = dict(self._map_transfer_status)
             return status
 
 
@@ -465,13 +620,24 @@ def main() -> None:
         robot_name=ROBOT_NAME,
     )
     operations.mark_gateway_started()
-    relay = RobotRelay(locator, operations)
+    relay = RobotRelay(
+        locator,
+        operations,
+        MapInbox(MAP_DIRECTORY, MAP_NAME),
+    )
     relay.start()
+
+    def handle_client(connection: socket.socket, address: Any) -> None:
+        with connection:
+            try:
+                serve_gui(connection, relay, operations)
+            except (ConnectionError, OSError, ValueError) as error:
+                print(f"GUI disconnected: {error}", flush=True)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((LISTEN_HOST, COMMAND_PORT))
-        server.listen(4)
+        server.listen(16)
         server.settimeout(0.5)
         print(f"robot gateway listening through TCP :{COMMAND_PORT}", flush=True)
         while not STOP_EVENT.is_set():
@@ -480,11 +646,20 @@ def main() -> None:
             except socket.timeout:
                 continue
             print(f"GUI connected: {address}", flush=True)
-            with connection:
-                try:
-                    serve_gui(connection, relay, operations)
-                except (ConnectionError, OSError, ValueError) as error:
-                    print(f"GUI disconnected: {error}", flush=True)
+            # RobotRelay already guards its shared state with a lock (it was
+            # designed for concurrent access), but this loop used to call
+            # serve_gui() inline and block on it -- accept() never ran again
+            # until that one client fully disconnected. A GUI reconnect
+            # (after any network blip) or a second client then had to wait
+            # for the old, possibly still-lingering connection to be reaped
+            # by serve_gui's own idle timeout before it could even be
+            # accepted, which looked like the gateway silently ignoring
+            # commands. Serve each connection on its own thread instead.
+            threading.Thread(
+                target=handle_client,
+                args=(connection, address),
+                daemon=True,
+            ).start()
 
     relay.shutdown()
     operations.close()

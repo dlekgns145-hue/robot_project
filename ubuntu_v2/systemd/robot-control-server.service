@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/robot-control-server/ubuntu_v2
 ExecStart=/opt/robot-control-server/ubuntu_v2/scripts/run_compute_mapping.sh
-ExecStop=/usr/bin/docker compose --profile compute stop compute-mapping ros-transport gateway
+ExecStop=/usr/bin/docker compose --profile compute stop map-postprocessor gateway
 TimeoutStartSec=0
 TimeoutStopSec=90
 

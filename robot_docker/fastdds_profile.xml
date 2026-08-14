@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <!-- The default PREALLOCATED history memory policy sizes a
+             reader/writer's sample buffer from the first message it sees and
+             cannot grow it afterwards. Messages relayed through the
+             CycloneDDS-based Zenoh bridge can arrive at a different size than
+             a native FastDDS peer would produce, which then hits "payload
+             size ... larger than the history payload size ... cannot be
+             resized" and the sample is silently dropped -- observed on the
+             /navigate_to_pose action's goal-response, leaving navigation
+             stuck forever. DYNAMIC_REUSABLE lets the buffer grow instead. -->
+        <data_writer profile_name="default_publisher_profile" is_default_profile="true">
+            <historyMemoryPolicy>DYNAMIC_REUSABLE</historyMemoryPolicy>
+        </data_writer>
+        <data_reader profile_name="default_subscriber_profile" is_default_profile="true">
+            <historyMemoryPolicy>DYNAMIC_REUSABLE</historyMemoryPolicy>
+        </data_reader>
+    </profiles>
+</dds>

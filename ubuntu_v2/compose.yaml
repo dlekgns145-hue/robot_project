@@ -40,7 +40,7 @@ services:
     logging: *service-logging
     volumes:
       - ./data:/var/lib/robot-control-v2
-      - ./maps:/opt/robot-control/maps:ro
+      - ./maps:/opt/robot-control/maps
     environment:
       COMMAND_PORT: ${COMMAND_PORT:-9999}
       COMMAND_TOKEN: ${COMMAND_TOKEN:-change-this-token}
@@ -62,6 +62,7 @@ services:
       ROBOT_NAME: ${ROBOT_NAME:-Yahboom Robot 1}
       OPERATIONS_DB_PATH: /var/lib/robot-control-v2/operations.sqlite3
       MAP_DIRECTORY: /opt/robot-control/maps
+      MAP_NAME: ${MAP_NAME:-orchard_map}
     healthcheck:
       test:
         - CMD-SHELL
@@ -74,7 +75,32 @@ services:
       retries: 3
       start_period: 5s
 
-  # LiDAR SLAM/Nav2 processing runs on the Ubuntu compute server.
+  # Default mapping architecture: Pi performs live SLAM, then the gateway
+  # places one completed PGM/YAML snapshot in this server-side worker's inbox.
+  # No partial/live raster is reconstructed on the server.
+  map-postprocessor:
+    image: ${ROBOT_COMPUTE_IMAGE:-robot-control-compute:humble}
+    build:
+      context: ..
+      dockerfile: ubuntu_v2/docker/Dockerfile.compute
+      args:
+        BASE_IMAGE: ${COMPUTE_BASE_IMAGE:-ros:humble-ros-base-jammy}
+    container_name: robot-v2-map-postprocessor
+    network_mode: none
+    restart: unless-stopped
+    init: true
+    profiles: [compute]
+    logging: *service-logging
+    environment:
+      MAP_DIRECTORY: /opt/robot-control/maps
+      MAP_POSTPROCESS_POLL_SECONDS: ${MAP_POSTPROCESS_POLL_SECONDS:-2.0}
+    volumes:
+      - ./maps:/opt/robot-control/maps
+    command: ["map-postprocessor"]
+
+  # Optional/manual fallback only. Normal mapping runs on the Raspberry Pi;
+  # keeping this service out of the default boot avoids duplicate ROS service
+  # names and prevents partial map frames from crossing the network.
   # Raw robot topics arrive over ROS 2 DDS; only /cmd_vel_server is returned.
   compute-mapping:
     image: ${ROBOT_COMPUTE_IMAGE:-robot-control-compute:humble}
@@ -98,8 +124,8 @@ services:
       # on loopback UDP; Zenoh remains the only cross-host transport.
       FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       ROBOT_MAP_OUTPUT: /opt/robot-control/maps/orchard_map
-      ROBOT_MAPPING_MAXIMUM_RUNTIME: ${ROBOT_MAPPING_MAXIMUM_RUNTIME:-900.0}
-      ROBOT_MAPPING_MAXIMUM_RADIUS: ${ROBOT_MAPPING_MAXIMUM_RADIUS:-8.0}
+      ROBOT_MAPPING_MAXIMUM_RUNTIME: ${ROBOT_MAPPING_MAXIMUM_RUNTIME:-1800.0}
+      ROBOT_MAPPING_MAXIMUM_RADIUS: ${ROBOT_MAPPING_MAXIMUM_RADIUS:-12.0}
       ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT: ${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-55.0}
       ROBOT_MAPPING_MAXIMUM_MAP_AGE: ${ROBOT_MAPPING_MAXIMUM_MAP_AGE:-8.0}
       ROBOT_MAPPING_MINIMUM_SAVE_KNOWN_AREA: ${ROBOT_MAPPING_MINIMUM_SAVE_KNOWN_AREA:-1.0}

@@ -8,7 +8,7 @@
    - /scan -> /scan_fixed (내비게이션용) 및 /scan_slam (SLAM용 4m 컷오프)
 
 2. odom_relay.py:
-   - 오도메트리 데이터 검증 및 /tf_nav 분리 리레이 (NaN/Inf 튀는 현상 방지)
+   - 오도메트리 데이터 검증 및 odom -> base_footprint TF 발행 (NaN/Inf 튀는 현상 방지)
 
 3. slam_toolbox (async_slam_toolbox_node):
    - 2D LiDAR 데이터 기반 실시간 SLAM 점유 격자 지도(/map) 생성 노드
@@ -31,6 +31,7 @@ from launch.actions import (
     ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
+    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -99,13 +100,13 @@ def generate_launch_description():
                 default_value="/opt/robot-control/maps/orchard_map",
             ),
             DeclareLaunchArgument(
-                "mapping_maximum_runtime", default_value="900.0"
+                "mapping_maximum_runtime", default_value="1800.0"
             ),
             DeclareLaunchArgument(
-                "mapping_maximum_radius", default_value="8.0"
+                "mapping_maximum_radius", default_value="12.0"
             ),
             DeclareLaunchArgument(
-                "mapping_goal_progress_timeout", default_value="55.0"
+                "mapping_goal_progress_timeout", default_value="25.0"
             ),
             DeclareLaunchArgument(
                 "mapping_maximum_map_age", default_value="8.0"
@@ -118,6 +119,15 @@ def generate_launch_description():
             ),
             GroupAction(
                 [
+                    # The Yahboom bringup publishes its EKF odom ->
+                    # base_footprint transform on /tf.  odom_relay publishes
+                    # the same frame pair from finite /odom_raw values.  If
+                    # both reach slam_toolbox, tf2 alternates between two
+                    # different robot poses and the map is stamped in rotated
+                    # copies.  Keep every mapping-owned transform and listener
+                    # on /tf_nav.  The Docker images also patch Nav2's internal
+                    # absolute-/tf-to-relative-tf remap so the included nodes
+                    # remain in this isolated graph.
                     SetRemap(src="/tf", dst="/tf_nav"),
                     # Nav2 may run on the robot or an external compute server.
                     # In both cases its command is only a short-lived proposal;
@@ -132,6 +142,10 @@ def generate_launch_description():
                             "__node:=navigation_scan_filter",
                             "-p",
                             "output_topic:=/scan_fixed",
+                            "-p",
+                            # scan_time_fix aligns each scan to the latest
+                            # /odom_nav timestamp that has an exact TF sample.
+                            "timestamp_delay_seconds:=0.0",
                         ],
                         output="screen",
                     ),
@@ -145,15 +159,22 @@ def generate_launch_description():
                             "-p",
                             "output_topic:=/scan_slam",
                             "-p",
+                            # Fall back to receive time until /odom_nav is
+                            # discovered; normal scans use its exact stamp.
+                            "timestamp_delay_seconds:=0.0",
+                            "-p",
                             "max_publish_hz:=5.0",
                             "-p",
                             "spatial_filter_radius:=2",
                             "-p",
                             "spatial_tolerance:=0.12",
                             "-p",
-                            "temporal_window:=3",
+                            # Beam-index medians from several robot poses smear
+                            # walls during turns. Spatial filtering removes
+                            # isolated speckles without mixing moving scans.
+                            "temporal_window:=1",
                             "-p",
-                            "temporal_minimum_hits:=2",
+                            "temporal_minimum_hits:=1",
                             "-p",
                             "temporal_tolerance:=0.15",
                             "-p",
@@ -171,45 +192,68 @@ def generate_launch_description():
                         ],
                         output="screen",
                     ),
-                    Node(
-                        package="slam_toolbox",
-                        executable="async_slam_toolbox_node",
-                        name="slam_toolbox",
-                        parameters=[
-                            slam_params_path,
-                            {"use_sim_time": use_sim_time},
+                    # slam_toolbox and the whole Nav2 bringup create a dozen-plus
+                    # DDS participants almost simultaneously. If that burst
+                    # overlaps odom_relay's own participant/publisher
+                    # announcement, FastDDS discovery can occasionally fail to
+                    # match odom_relay's writer with these nodes' TF listeners.
+                    # Giving odom_relay/scan filters a short head start lets
+                    # their endpoints settle before this heavier group joins;
+                    # this is especially important for the isolated /tf_nav
+                    # graph, which has no continuously-running vendor writer.
+                    TimerAction(
+                        period=4.0,
+                        actions=[
+                            Node(
+                                package="slam_toolbox",
+                                executable="async_slam_toolbox_node",
+                                name="slam_toolbox",
+                                parameters=[
+                                    slam_params_path,
+                                    {"use_sim_time": use_sim_time},
+                                ],
+                                remappings=[("/tf", "/tf_nav")],
+                                output="screen",
+                            ),
+                            IncludeLaunchDescription(
+                                PythonLaunchDescriptionSource(
+                                    [nav2_bringup_dir, "/launch/navigation_launch.py"]
+                                ),
+                                launch_arguments={
+                                    "use_sim_time": use_sim_time,
+                                    "params_file": mapping_nav_params,
+                                    "autostart": "true",
+                                    "use_composition": "False",
+                                }.items(),
+                            ),
+                            Node(
+                                package="nav2_map_server",
+                                executable="map_saver_server",
+                                name="map_saver",
+                                parameters=[
+                                    nav_params_path,
+                                    {"use_sim_time": use_sim_time},
+                                ],
+                                output="screen",
+                            ),
+                            Node(
+                                package="nav2_lifecycle_manager",
+                                executable="lifecycle_manager",
+                                name="lifecycle_manager_mapping_save",
+                                parameters=[
+                                    {"use_sim_time": use_sim_time},
+                                    {"autostart": True},
+                                    {"node_names": ["map_saver"]},
+                                ],
+                                output="screen",
+                            ),
+                            # The image patches Nav2's stock launch so the
+                            # velocity smoother and recovery behaviors publish
+                            # directly to /cmd_vel_server. Do not relay the
+                            # shared /cmd_vel topic: it also contains the robot
+                            # bridge's final motor output and creates a feedback
+                            # loop that can overwrite Nav2 with its own zeros.
                         ],
-                        remappings=[("/tf", "/tf_nav")],
-                        output="screen",
-                    ),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            [nav2_bringup_dir, "/launch/navigation_launch.py"]
-                        ),
-                        launch_arguments={
-                            "use_sim_time": use_sim_time,
-                            "params_file": mapping_nav_params,
-                            "autostart": "true",
-                            "use_composition": "False",
-                        }.items(),
-                    ),
-                    Node(
-                        package="nav2_map_server",
-                        executable="map_saver_server",
-                        name="map_saver",
-                        parameters=[nav_params_path, {"use_sim_time": use_sim_time}],
-                        output="screen",
-                    ),
-                    Node(
-                        package="nav2_lifecycle_manager",
-                        executable="lifecycle_manager",
-                        name="lifecycle_manager_mapping_save",
-                        parameters=[
-                            {"use_sim_time": use_sim_time},
-                            {"autostart": True},
-                            {"node_names": ["map_saver"]},
-                        ],
-                        output="screen",
                     ),
                     Node(
                         package="tf2_ros",
@@ -241,43 +285,72 @@ def generate_launch_description():
                             "laser_frame",
                         ],
                     ),
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            f"{runtime_dir}/autonomous_mapping.py",
-                            "--ros-args",
-                            "-r",
-                            "/tf:=/tf_nav",
-                            "-p",
-                            ["start_enabled:=", exploration_enabled],
-                            "-p",
-                            ["map_output:=", map_output],
-                            "-p",
-                            ["maximum_runtime:=", mapping_maximum_runtime],
-                            "-p",
-                            [
-                                "maximum_exploration_radius:=",
-                                mapping_maximum_radius,
-                            ],
-                            "-p",
-                            [
-                                "goal_progress_timeout:=",
-                                mapping_goal_progress_timeout,
-                            ],
-                            "-p",
-                            ["maximum_map_age:=", mapping_maximum_map_age],
-                            "-p",
-                            [
-                                "minimum_save_known_area_m2:=",
-                                mapping_minimum_save_known_area,
-                            ],
-                            "-p",
-                            [
-                                "minimum_save_free_area_m2:=",
-                                mapping_minimum_save_free_area,
-                            ],
+                    # A separate late-joining service client republishes the
+                    # current map continuously. This breaks the startup
+                    # deadlock when FastDDS misses SLAM's initial /map sample.
+                    TimerAction(
+                        period=10.0,
+                        actions=[
+                            ExecuteProcess(
+                                cmd=[
+                                    "python3",
+                                    f"{runtime_dir}/map_service_relay.py",
+                                ],
+                                output="screen",
+                            ),
                         ],
-                        output="screen",
+                    ),
+                    # Join after the relay publisher exists. This avoids the
+                    # same FastDDS late-writer discovery failure on the
+                    # explorer's volatile refresh subscription.
+                    TimerAction(
+                        period=12.0,
+                        actions=[
+                            ExecuteProcess(
+                                cmd=[
+                                    "python3",
+                                    f"{runtime_dir}/autonomous_mapping.py",
+                                    "--ros-args",
+                                    "-r",
+                                    "/tf:=/tf_nav",
+                                    "-p",
+                                    ["start_enabled:=", exploration_enabled],
+                                    "-p",
+                                    ["map_output:=", map_output],
+                                    "-p",
+                                    [
+                                        "maximum_runtime:=",
+                                        mapping_maximum_runtime,
+                                    ],
+                                    "-p",
+                                    [
+                                        "maximum_exploration_radius:=",
+                                        mapping_maximum_radius,
+                                    ],
+                                    "-p",
+                                    [
+                                        "goal_progress_timeout:=",
+                                        mapping_goal_progress_timeout,
+                                    ],
+                                    "-p",
+                                    [
+                                        "maximum_map_age:=",
+                                        mapping_maximum_map_age,
+                                    ],
+                                    "-p",
+                                    [
+                                        "minimum_save_known_area_m2:=",
+                                        mapping_minimum_save_known_area,
+                                    ],
+                                    "-p",
+                                    [
+                                        "minimum_save_free_area_m2:=",
+                                        mapping_minimum_save_free_area,
+                                    ],
+                                ],
+                                output="screen",
+                            ),
+                        ],
                     ),
                 ]
             ),

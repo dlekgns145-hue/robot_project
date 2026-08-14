@@ -33,6 +33,8 @@ cp -a \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/robot_locator.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/operations_store.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/map_payload.py" \
+    "${PROJECT_DIR}/ubuntu_v2/robot_app/map_inbox.py" \
+    "${PROJECT_DIR}/ubuntu_v2/robot_app/map_postprocess.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/robot_gateway.py" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/robot_app/"
 cp -a \
@@ -59,9 +61,11 @@ cp -a \
     "${PROJECT_DIR}/robot_docker/scan_diagnostics.py" \
     "${PROJECT_DIR}/robot_docker/odom_relay.py" \
     "${PROJECT_DIR}/robot_docker/scan_time_fix.py" \
+    "${PROJECT_DIR}/robot_docker/cmd_vel_relay.py" \
     "${PROJECT_DIR}/robot_docker/autonomous_mapping.py" \
     "${PROJECT_DIR}/robot_docker/frontier_core.py" \
     "${PROJECT_DIR}/robot_docker/mapping_core.py" \
+    "${PROJECT_DIR}/robot_docker/map_bundle.py" \
     "${PROJECT_DIR}/robot_docker/camera_obstacle_guard.py" \
     "${PROJECT_DIR}/robot_docker/mapping_slam_params.yaml" \
     "${STAGING_DIR}/${IMAGE_NAME}/robot_docker/"
@@ -79,8 +83,7 @@ if [[ -f "${PROJECT_DIR}/images/robot-control-server-images.tar" ]]; then
 fi
 chmod 0755 "${STAGING_DIR}/${IMAGE_NAME}/INSTALL_SERVER.sh" \
     "${STAGING_DIR}/${IMAGE_NAME}/UNINSTALL_SERVER.sh" \
-    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts/"*.sh \
-    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts/"*.py
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/scripts/"*.sh
 
 install -d "${OUTPUT_DIR}"
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata \

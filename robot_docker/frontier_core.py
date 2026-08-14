@@ -26,6 +26,8 @@ class FrontierCandidate:
     cell_count: int
     distance: float
     score: float
+    frontier_x: float
+    frontier_y: float
 
 
 def _neighbors4(index: int, width: int, height: int) -> Iterable[int]:
@@ -333,6 +335,8 @@ def frontier_candidates(
     max_distance: float = 8.0,
     blacklisted: Sequence[tuple[float, float]] = (),
     blacklist_radius: float = 0.6,
+    staged_blacklisted: Sequence[tuple[float, float]] = (),
+    staged_blacklist_radius: float = 0.15,
     gain_weight: float = 1.0,
     distance_weight: float = 0.45,
     goal_standoff: float = 0.0,
@@ -367,6 +371,24 @@ def frontier_candidates(
         usable_cells: list[tuple[int, int, float, float, float, float]] = []
         for index in cluster:
             if index not in reachable:
+                continue
+            frontier_grid_x = index % spec.width
+            frontier_grid_y = index // spec.width
+            frontier_world_x, frontier_world_y = grid_cell_to_world(
+                frontier_grid_x, frontier_grid_y, spec
+            )
+            # Blacklist the actual gray boundary, not the short staged goal.
+            # Several distant frontiers can share almost the same first 35 cm
+            # of path; comparing their staged goals would incorrectly suppress
+            # every direction after one navigation failure.
+            if any(
+                math.hypot(
+                    frontier_world_x - blocked_x,
+                    frontier_world_y - blocked_y,
+                )
+                <= blacklist_radius
+                for blocked_x, blocked_y in blacklisted
+            ):
                 continue
             approach_index = _path_standoff_cell(
                 index,
@@ -412,8 +434,8 @@ def frontier_candidates(
                 continue
             if any(
                 math.hypot(world_x - blocked_x, world_y - blocked_y)
-                <= blacklist_radius
-                for blocked_x, blocked_y in blacklisted
+                <= staged_blacklist_radius
+                for blocked_x, blocked_y in staged_blacklisted
             ):
                 continue
             usable_cells.append(
@@ -442,6 +464,11 @@ def frontier_candidates(
 
         frontier_length = len(cluster) * spec.resolution
         score = gain_weight * frontier_length - distance_weight * target_distance
+        frontier_x, frontier_y = grid_cell_to_world(
+            representative % spec.width,
+            representative // spec.width,
+            spec,
+        )
         candidates.append(
             FrontierCandidate(
                 grid_x=grid_x,
@@ -451,6 +478,8 @@ def frontier_candidates(
                 cell_count=len(cluster),
                 distance=distance,
                 score=score,
+                frontier_x=frontier_x,
+                frontier_y=frontier_y,
             )
         )
 

@@ -38,9 +38,11 @@ def generate_launch_description():
             ),
             GroupAction(
                 [
-                    # The vendor base and EKF publish stale/NaN odom transforms.
-                    # Keep Nav2 on a clean dynamic TF channel containing only
-                    # the finite relay transform and AMCL's map transform.
+                    # The vendor EKF and odom_relay both publish odom ->
+                    # base_footprint.  Isolate the finite relay, AMCL and Nav2
+                    # listeners from the conflicting vendor transform.  The
+                    # Docker images patch Nav2's internal /tf remap to preserve
+                    # this scope through the included bringup launch.
                     SetRemap(src="/tf", dst="/tf_nav"),
                     # Final motor authority remains on the robot safety bridge.
                     SetRemap(src="/cmd_vel", dst="/cmd_vel_server"),
@@ -48,6 +50,10 @@ def generate_launch_description():
                         cmd=[
                             "python3",
                             f"{runtime_dir}/scan_time_fix.py",
+                            "--ros-args",
+                            "-p",
+                            # Align scans to the latest /odom_nav TF sample.
+                            "timestamp_delay_seconds:=0.0",
                         ],
                         output="screen",
                     ),
@@ -68,6 +74,10 @@ def generate_launch_description():
                         ],
                         output="screen",
                     ),
+                    # The image patches Nav2's stock launch so smoothed and
+                    # recovery velocities publish directly to
+                    # /cmd_vel_server. A /cmd_vel relay would also consume the
+                    # robot bridge's final output and feed it back into itself.
                     IncludeLaunchDescription(
                         PythonLaunchDescriptionSource(
                             [nav2_bringup_dir, "/launch/bringup_launch.py"]

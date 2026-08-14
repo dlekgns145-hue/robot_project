@@ -10,7 +10,7 @@ sudo ./INSTALL_SERVER.sh
 ```
 
 설치 프로그램은 Docker Engine과 Compose plugin이 없으면 Docker 공식 저장소에서
-설치하고, gateway와 LiDAR SLAM/Nav2 이미지를 빌드한 다음 systemd에
+설치하고, gateway와 지도 후처리 이미지를 빌드한 다음 systemd에
 등록합니다. 이후 PC를 재부팅해도 서버가 자동으로 시작됩니다.
 
 인터넷이 없는 Ubuntu에 옮기려면 먼저 Docker가 실행되는 같은 CPU 아키텍처의
@@ -50,10 +50,13 @@ sudo sed -n 's/^COMMAND_TOKEN=//p' \
 sudo systemctl status robot-control-server
 cd /opt/robot-control-server/ubuntu_v2
 sudo docker compose --profile compute ps
-sudo docker compose --profile compute logs -f gateway ros-transport compute-mapping
+sudo docker compose --profile compute logs -f gateway map-postprocessor
 ```
 
-지도와 운영 기록은 재설치해도 보존됩니다.
+원본 지도, 보정 지도, 처리 보고서와 운영 기록은 재설치해도 보존됩니다.
+보정 작업은 지도와 지도 저장 시점의 로봇 자세를 같은 좌표변환으로
+처리합니다. 결과 묶음은 로봇에 다시 전송되고, 다음 Navigation 시작 시
+보정 PGM/YAML과 보정 AMCL 초기 자세가 동시에 적용됩니다.
 
 ```text
 /opt/robot-control-server/ubuntu_v2/maps

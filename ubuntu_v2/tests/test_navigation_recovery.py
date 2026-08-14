@@ -150,6 +150,44 @@ class NavigationRecoveryTests(unittest.TestCase):
         filter_.update([1.02])
         self.assertTrue(filter_.ready)
 
+    def test_scan_timestamp_delay_is_bounded_and_normalized(self) -> None:
+        self.assertEqual(
+            self.scan_filter.delayed_stamp_parts(12_345_678_901, 0.15),
+            (12, 195_678_901),
+        )
+        self.assertEqual(
+            self.scan_filter.delayed_stamp_parts(50_000_000, 0.15),
+            (0, 0),
+        )
+        self.assertEqual(
+            self.scan_filter.delayed_stamp_parts(3_000_000_000, -1.0),
+            (3, 0),
+        )
+
+    def test_scan_uses_recent_odometry_timestamp(self) -> None:
+        self.assertEqual(
+            self.scan_filter.synchronized_stamp_parts(
+                12_500_000_000,
+                12_420_000_000,
+                12_450_000_000,
+                0.5,
+                0.1,
+            ),
+            (12, 420_000_000),
+        )
+
+    def test_scan_falls_back_when_odometry_is_stale(self) -> None:
+        self.assertEqual(
+            self.scan_filter.synchronized_stamp_parts(
+                12_500_000_000,
+                11_000_000_000,
+                11_500_000_000,
+                0.5,
+                0.1,
+            ),
+            (12, 400_000_000),
+        )
+
     def test_scan_indices_are_grouped_into_contiguous_runs(self) -> None:
         self.assertEqual(
             self.scan_diagnostics.contiguous_runs([1, 2, 3, 8, 10, 11]),
@@ -167,16 +205,42 @@ class NavigationRecoveryTests(unittest.TestCase):
             docker_dir / "recovered" / "dwb_nav_params_fixed.yaml"
         ).read_text()
 
+        # The vendor EKF and odom_relay both publish odom -> base_footprint.
+        # Mapping must keep its corrected transform graph isolated, including
+        # ExecuteProcess nodes whose CLI remaps do not inherit SetRemap.
         self.assertIn('SetRemap(src="/tf", dst="/tf_nav")', launch_text)
+        self.assertGreaterEqual(launch_text.count('"/tf:=/tf_nav"'), 2)
+        self.assertIn('remappings=[("/tf", "/tf_nav")]', launch_text)
+        self.assertIn("'/tf', '/tf_nav'", dockerfile_text)
         self.assertIn(
             'SetRemap(src="/cmd_vel", dst="/cmd_vel_server")', launch_text
         )
-        self.assertIn('("/tf", "/tf_nav")', launch_text)
+        self.assertNotIn("cmd_vel_relay.py", launch_text)
+        self.assertIn(
+            "('cmd_vel_smoothed', '/cmd_vel_server')", dockerfile_text
+        )
+        self.assertIn(
+            "remappings=remappings + [('cmd_vel', '/cmd_vel_server')]",
+            dockerfile_text,
+        )
         self.assertIn("scan_time_fix.py", launch_text)
         self.assertIn("odom_relay.py", launch_text)
         self.assertIn('name="base_footprint_to_base_link"', launch_text)
         self.assertIn("navigation_launch.py", launch_text)
         self.assertIn("autonomous_mapping.py", launch_text)
+        self.assertIn('period=12.0', launch_text)
+        self.assertIn('period=4.0', launch_text)
+        autonomous_source = (docker_dir / "autonomous_mapping.py").read_text()
+        self.assertIn("GetMap", autonomous_source)
+        self.assertIn('"/slam_toolbox/dynamic_map"', autonomous_source)
+        self.assertIn("def _refresh_map", autonomous_source)
+        self.assertIn('"/autonomous_mapping/map_refresh"', autonomous_source)
+        self.assertIn("map_service_relay.py", launch_text)
+        self.assertIn("map_service_relay.py", dockerfile_text)
+        relay_source = (docker_dir / "map_service_relay.py").read_text()
+        self.assertIn('"/autonomous_mapping/battery_refresh"', relay_source)
+        self.assertIn('UInt16, "/battery"', relay_source)
+        self.assertIn('"/autonomous_mapping/battery_refresh"', autonomous_source)
         self.assertIn("mapping_core.py", dockerfile_text)
         self.assertNotIn("map_texture_recorder.py", launch_text)
         self.assertNotIn("map_texture_core.py", dockerfile_text)
@@ -186,11 +250,23 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertNotIn('package="orchard_mapper"', launch_text)
         self.assertNotIn("camera_url", launch_text)
         self.assertIn("ROBOT_MAPPING_MAXIMUM_RUNTIME", entrypoint_text)
+        self.assertIn('${ROBOT_MAPPING_MAXIMUM_RUNTIME:-1800.0}', entrypoint_text)
+        self.assertIn('${ROBOT_MAPPING_MAXIMUM_RADIUS:-12.0}', entrypoint_text)
         self.assertIn("ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT", entrypoint_text)
+        self.assertIn('${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-25.0}', entrypoint_text)
         self.assertIn("ROBOT_MAPPING_MAXIMUM_MAP_AGE", entrypoint_text)
         self.assertIn("minimum_save_known_area_m2:=", launch_text)
         self.assertIn("minimum_save_free_area_m2:=", launch_text)
         self.assertIn("maximum_exploration_radius:=", launch_text)
+        self.assertIn('"mapping_maximum_runtime", default_value="1800.0"', launch_text)
+        self.assertIn('"mapping_maximum_radius", default_value="12.0"', launch_text)
+        self.assertIn("SerializePoseGraph", autonomous_source)
+        self.assertIn("DeserializePoseGraph", autonomous_source)
+        self.assertIn('"/slam_toolbox/serialize_map"', autonomous_source)
+        self.assertIn('"/slam_toolbox/deserialize_map"', autonomous_source)
+        self.assertIn('"minimum_battery_percent", 25', autonomous_source)
+        self.assertIn('UInt16, "/battery"', autonomous_source)
+        self.assertIn("saving partial map before low-battery shutdown", autonomous_source)
         self.assertIn(
             '"planner_server.ros__parameters.GridBased.tolerance": "0.10"',
             launch_text,
@@ -201,10 +277,14 @@ class NavigationRecoveryTests(unittest.TestCase):
         )
 
         self.assertIn("ROBOT_MAPPING_MAXIMUM_RADIUS", compose_text)
+        self.assertNotIn("RMW_IMPLEMENTATION", compose_text)
         self.assertNotIn("ROBOT_TEXTURE", compose_text)
         self.assertIn("output_topic:=/scan_slam", launch_text)
-        self.assertIn("temporal_window:=3", launch_text)
+        self.assertGreaterEqual(launch_text.count("timestamp_delay_seconds:=0.0"), 2)
+        self.assertIn("temporal_window:=1", launch_text)
+        self.assertIn("temporal_minimum_hits:=1", launch_text)
         self.assertIn("maximum_range_m:=4.0", launch_text)
+        self.assertIn("transform_publish_period: 0.05", params_text)
         self.assertIn("RewrittenYaml", launch_text)
         self.assertIn('"yaw_goal_tolerance": "3.14"', launch_text)
         self.assertIn('"observation_sources": "scan"', launch_text)
@@ -230,13 +310,19 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn('"/compute_path_to_pose"', source)
         self.assertIn("def _check_frontier_path", source)
         self.assertIn("frontier_inaccessible", source)
-        self.assertIn('"maximum_goal_step_distance", 0.35', source)
-        self.assertIn('"failed_goal_blacklist_seconds", 20.0', source)
+        self.assertIn('"maximum_goal_step_distance", 0.75', source)
+        self.assertIn('"failed_goal_blacklist_seconds", 120.0', source)
+        self.assertIn('"reached_goal_blacklist_seconds", 1800.0', source)
         self.assertIn("blacklisted=[]", source)
+        self.assertIn('"staged_goal_blacklist_radius", 0.35', source)
+        self.assertIn("staged_blacklisted=[]", source)
+        self.assertIn("active_reached_blacklist", source)
+        self.assertIn("blacklisted=active_reached_blacklist", source)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
         launch_text = (docker_dir / "navigation_runtime_launch.py").read_text()
+        dockerfile_text = (docker_dir / "Dockerfile").read_text()
         compose_text = (docker_dir / "compose.yaml").read_text()
         entrypoint_text = (docker_dir / "entrypoint.sh").read_text()
         params_text = (
@@ -246,6 +332,14 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("/opt/robot-control/maps/orchard_map.yaml", launch_text)
         self.assertIn('"autostart": "true"', launch_text)
         self.assertIn("camera_obstacle_guard.py", launch_text)
+        self.assertIn("timestamp_delay_seconds:=0.0", launch_text)
+        self.assertIn('SetRemap(src="/tf", dst="/tf_nav")', launch_text)
+        self.assertIn('"/tf:=/tf_nav"', launch_text)
+        self.assertNotIn("cmd_vel_relay.py", launch_text)
+        self.assertIn("'/tf', '/tf_nav'", dockerfile_text)
+        self.assertIn(
+            "('cmd_vel_smoothed', '/cmd_vel_server')", dockerfile_text
+        )
         self.assertIn("navigation-runtime:", compose_text)
         self.assertIn('profiles: [navigation]', compose_text)
         self.assertIn('command: ["navigation"]', compose_text)
@@ -255,6 +349,8 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("y: 0.508", params_text)
         self.assertIn("min_vel_x: 0.0", params_text)
         self.assertNotIn("min_vel_x: -", params_text)
+        self.assertIn("max_vel_x: 0.12", params_text)
+        self.assertIn("max_velocity: [0.12, 0.0, 0.18]", params_text)
         self.assertIn("prepare_navigation_params.py", entrypoint_text)
         self.assertIn("last_pose.json", entrypoint_text)
 

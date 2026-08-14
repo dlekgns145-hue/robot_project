@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
         self._last_live_map_sequence = -1
         self._last_live_map_request_at = 0.0
         self._last_map_payload_source = ""
+        self._last_mapping_save_error = ""
         self._manual_keys: set[int] = set()
         self._build_ui()
         self._load_settings()
@@ -801,6 +802,7 @@ class MainWindow(QMainWindow):
         self._map_requested_for_ip = ""
         self._mapping_active = False
         self._last_saved_map = ""
+        self._last_mapping_save_error = ""
         self.connect_button.setText("서버에 연결")
         self.host_edit.setEnabled(True)
         self.command_port.setEnabled(True)
@@ -1001,13 +1003,9 @@ class MainWindow(QMainWindow):
     def _update_mapping_status(self, mapping: dict) -> None:
         state = str(mapping.get("state") or "idle")
         self._mapping_active = bool(mapping.get("enabled", False))
-        message = str(mapping.get("message") or state)
         map_sequence = mapping.get("map_sequence")
-        distance = mapping.get("distance_remaining")
-        details = []
         if map_sequence is not None:
             sequence = int(map_sequence)
-            details.append(f"지도 갱신 {sequence}회")
             if self._mapping_active and sequence != self._last_live_map_sequence:
                 self._last_live_map_sequence = sequence
                 now = time.monotonic()
@@ -1020,24 +1018,20 @@ class MainWindow(QMainWindow):
                     self.client.request_map()
         if not self._mapping_active:
             self._last_live_map_sequence = -1
-        if distance is not None:
-            details.append(f"목표까지 {float(distance):.2f} m")
-        quality = mapping.get("map_quality")
-        if isinstance(quality, dict):
-            known_area = quality.get("known_area_m2")
-            free_area = quality.get("free_area_m2")
-            if known_area is not None and free_area is not None:
-                details.append(
-                    f"관측 {float(known_area):.2f} m² / 주행가능 {float(free_area):.2f} m²"
-                )
-        map_age = mapping.get("map_age_seconds")
-        if map_age is not None and float(map_age) >= 3.0:
-            details.append(f"지도 지연 {float(map_age):.1f}초")
         save_error = str(mapping.get("last_save_error") or "")
-        if save_error:
-            details.append(f"저장 오류: {save_error}")
-        suffix = f" · {' · '.join(details)}" if details else ""
-        self.mapping_status_label.setText(f"{message}{suffix}")
+        if save_error != self._last_mapping_save_error:
+            self._last_mapping_save_error = save_error
+            if save_error:
+                self.append_log(f"지도 저장 오류: {save_error}")
+        if state == "unavailable":
+            simple_status = "매핑 런타임 대기 중"
+        elif self._mapping_active:
+            simple_status = "매핑 중"
+        elif map_sequence:
+            simple_status = "매핑 완료"
+        else:
+            simple_status = "대기 중"
+        self.mapping_status_label.setText(simple_status)
         available = state != "unavailable" and self.robot_connected
         self.mapping_start_button.setEnabled(available and not self._mapping_active)
         self.mapping_stop_button.setEnabled(available and self._mapping_active)
