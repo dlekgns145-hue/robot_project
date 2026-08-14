@@ -83,6 +83,9 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertTrue(
             self.scan_filter.is_self_reflection(math.radians(-168.0), 0.12)
         )
+        self.assertTrue(
+            self.scan_filter.is_self_reflection(math.radians(-172.1), 0.12)
+        )
 
     def test_front_obstacle_is_not_filtered(self) -> None:
         self.assertFalse(self.scan_filter.is_self_reflection(0.0, 0.15))
@@ -253,7 +256,7 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn('${ROBOT_MAPPING_MAXIMUM_RUNTIME:-1800.0}', entrypoint_text)
         self.assertIn('${ROBOT_MAPPING_MAXIMUM_RADIUS:-12.0}', entrypoint_text)
         self.assertIn("ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT", entrypoint_text)
-        self.assertIn('${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-25.0}', entrypoint_text)
+        self.assertIn('${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-10.0}', entrypoint_text)
         self.assertIn("ROBOT_MAPPING_MAXIMUM_MAP_AGE", entrypoint_text)
         self.assertIn("minimum_save_known_area_m2:=", launch_text)
         self.assertIn("minimum_save_free_area_m2:=", launch_text)
@@ -279,6 +282,8 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("ROBOT_MAPPING_MAXIMUM_RADIUS", compose_text)
         self.assertNotIn("RMW_IMPLEMENTATION", compose_text)
         self.assertNotIn("ROBOT_TEXTURE", compose_text)
+        self.assertIn('NAVIGATION_LEASE_TIMEOUT_SEC: "10.0"', compose_text)
+        self.assertIn('SERVER_MIN_LINEAR_SPEED: "0.04"', compose_text)
         self.assertIn("output_topic:=/scan_slam", launch_text)
         self.assertGreaterEqual(launch_text.count("timestamp_delay_seconds:=0.0"), 2)
         self.assertIn("temporal_window:=1", launch_text)
@@ -311,13 +316,25 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("def _check_frontier_path", source)
         self.assertIn("frontier_inaccessible", source)
         self.assertIn('"maximum_goal_step_distance", 0.75', source)
-        self.assertIn('"failed_goal_blacklist_seconds", 120.0', source)
+        self.assertIn('"goal_progress_timeout", 10.0', source)
+        self.assertIn('"stalled_goal_stage_blacklist_seconds", 8.0', source)
+        self.assertIn('"frontier_failures_before_cooldown", 3', source)
+        self.assertIn('"failed_goal_blacklist_seconds", 20.0', source)
         self.assertIn('"reached_goal_blacklist_seconds", 1800.0', source)
-        self.assertIn("blacklisted=[]", source)
         self.assertIn('"staged_goal_blacklist_radius", 0.35', source)
-        self.assertIn("staged_blacklisted=[]", source)
+        self.assertIn('"preferred_path_obstacle_clearance", 0.40', source)
+        self.assertIn("minimum_path_obstacle_clearance=path_clearance", source)
+        self.assertIn('self.path_priority = "wide"', source)
+        self.assertIn('self.path_priority = "narrow_fallback"', source)
+        self.assertIn("ClearEntireCostmap", source)
         self.assertIn("active_reached_blacklist", source)
-        self.assertIn("blacklisted=active_reached_blacklist", source)
+        self.assertIn("staged_blacklisted=[]", source)
+        self.assertIn("Fresh Nav2 commands also renew it", source)
+        self.assertGreaterEqual(source.count("self._set_navigation_mode(True)"), 2)
+        self.assertEqual(
+            source.count("staged_blacklisted=active_staged_blacklist"), 3
+        )
+        self.assertGreaterEqual(source.count("blacklisted=active_blacklist"), 2)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"

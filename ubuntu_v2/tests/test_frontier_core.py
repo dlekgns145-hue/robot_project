@@ -281,9 +281,21 @@ class FrontierCoreTests(unittest.TestCase):
             max_distance=10.0,
             minimum_obstacle_clearance=0.15,
         )
+        wide_path_candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.35,
+            robot_y=0.45,
+            min_cells=2,
+            min_distance=0.0,
+            max_distance=10.0,
+            minimum_obstacle_clearance=0.0,
+            minimum_path_obstacle_clearance=0.15,
+        )
 
         self.assertEqual(len(raw_candidates), 1)
         self.assertEqual(safe_candidates, [])
+        self.assertEqual(wide_path_candidates, [])
 
     def test_blacklist_excludes_only_nearby_part_of_cluster(self) -> None:
         spec = GridSpec(width=5, height=5, resolution=0.2)

@@ -196,6 +196,12 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertAlmostEqual(linear, 0.08)
         self.assertEqual(angular, 0.0)
 
+    def test_small_translation_is_boosted_over_motor_deadzone(self) -> None:
+        linear, angular = self.bridge.shape_server_velocity(0.013, -0.009)
+
+        self.assertAlmostEqual(linear, 0.04)
+        self.assertEqual(angular, 0.0)
+
     def test_server_velocity_is_clamped(self) -> None:
         linear, angular = self.bridge.shape_server_velocity(1.0, -1.0)
 
@@ -213,6 +219,19 @@ class CommandLeaseTests(unittest.TestCase):
         message.data = False
         node.navigation_lease_callback(message)
         self.assertFalse(node.navigation_mode)
+
+    def test_fresh_server_command_renews_active_navigation_lease(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.navigation_lease_active = True
+        node.last_navigation_lease_at = 1.0
+        command = Twist()
+        command.linear.x = 0.013
+
+        node.server_cmd_callback(command)
+
+        self.assertGreater(node.last_navigation_lease_at, 1.0)
+        self.assertAlmostEqual(node.server_linear, 0.04)
 
     def test_stale_server_command_is_stopped_on_robot(self) -> None:
         node = self.make_node()

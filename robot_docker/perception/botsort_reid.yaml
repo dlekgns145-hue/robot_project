@@ -1,0 +1,22 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+#
+# BoT-SORT tracker config with appearance ReID enabled (based on ultralytics'
+# default botsort.yaml). Motion-only tracking (with_reid: False) switches
+# track IDs easily when people cross paths or move fast, which was causing
+# the "wrong person becomes the target" bug in detect.py's reacquisition.
+
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 30
+match_thresh: 0.8
+fuse_score: True
+
+gmc_method: sparseOptFlow
+
+# ReID model related thresh
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: True   # was False - enable appearance embedding so track IDs survive occlusion/crossing
+model: auto        # auto-downloads a light ReID model (OSNet) on first use

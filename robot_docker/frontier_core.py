@@ -342,6 +342,7 @@ def frontier_candidates(
     goal_standoff: float = 0.0,
     maximum_goal_step_distance: float = 0.0,
     minimum_obstacle_clearance: float = 0.0,
+    minimum_path_obstacle_clearance: float | None = None,
     maximum_robot_free_seed_distance: float = 0.0,
 ) -> list[FrontierCandidate]:
     """Return scored, reachable frontier approach goals, best first.
@@ -349,6 +350,10 @@ def frontier_candidates(
     ``goal_standoff`` pulls each goal back from the changing unknown boundary
     into stable known-free space. This prevents a SLAM map update from turning
     the active Nav2 goal into an unknown cell while the robot is driving.
+
+    ``minimum_path_obstacle_clearance`` can be stricter than the final goal's
+    clearance. It allows the explorer to make a first pass through wide aisles
+    and use the normal safe clearance only after no wide route remains.
     """
 
     frontiers = frontier_cell_indices(data, spec)
@@ -359,7 +364,11 @@ def frontier_candidates(
         robot_x=robot_x,
         robot_y=robot_y,
         maximum_seed_distance=maximum_robot_free_seed_distance,
-        minimum_path_obstacle_clearance=minimum_obstacle_clearance,
+        minimum_path_obstacle_clearance=(
+            minimum_obstacle_clearance
+            if minimum_path_obstacle_clearance is None
+            else max(0.0, minimum_path_obstacle_clearance)
+        ),
     )
     candidates: list[FrontierCandidate] = []
 

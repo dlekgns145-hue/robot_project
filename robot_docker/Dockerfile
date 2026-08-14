@@ -12,11 +12,25 @@ COPY navigation_runtime_launch.py mapping_runtime_launch.py navigation_probe.py 
 COPY recovered/Broom.yaml recovered/Broom.pgm recovered/dwb_nav_params_fixed.yaml \
     mapping_slam_params.yaml \
     /opt/robot-control/navigation/
+COPY perception/detect.py perception/best.pt perception/botsort_reid.yaml \
+    perception/face_detection_yunet.onnx perception/face_recognition_sface.onnx \
+    /opt/robot-control/perception/
+COPY follow/follow_person.py /opt/robot-control/follow/
 
 RUN chmod 0755 /opt/robot-control/entrypoint.sh \
-    /opt/robot-control/navigation/*.py
+    /opt/robot-control/navigation/*.py \
+    /opt/robot-control/perception/*.py \
+    /opt/robot-control/follow/*.py
 
 RUN mkdir -p /opt/robot-control/maps
+
+# follow-me(YOLO 사람 인식 + 추적)에 필요한 패키지. cv_bridge는 ROS 배포판에 맞춰 apt로,
+# 나머지는 pip로 설치 -- opencv는 headless로 깔아서 컨테이너에 디스플레이가 없어도
+# import가 깨지지 않게 함 (detect.py의 show_debug_window는 배포 시 false로 실행).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ros-humble-cv-bridge \
+    && apt-get clean \
+    && pip3 install --no-cache-dir ultralytics opencv-python-headless
 
 # The image's baked-in ROS apt signing key expires periodically; refresh it
 # before installing anything new or apt-get update fails with EXPKEYSIG.

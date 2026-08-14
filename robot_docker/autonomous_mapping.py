@@ -29,14 +29,14 @@ import json
 import hashlib
 import math
 import os
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
-from nav2_msgs.srv import SaveMap
+from nav2_msgs.srv import ClearEntireCostmap, SaveMap
 from nav_msgs.msg import OccupancyGrid
 from nav_msgs.srv import GetMap
 from rclpy.action import ActionClient
@@ -64,6 +64,16 @@ from mapping_core import (
 )
 
 
+@dataclass
+class FrontierFailureRecord:
+    """Track repeated attempts without hiding a whole gray boundary at once."""
+
+    frontier_x: float
+    frontier_y: float
+    attempts: int = 0
+    approaches: set[tuple[int, int]] = field(default_factory=set)
+
+
 class AutonomousMappingNode(Node):
     """자율 탐색 매핑 노드 메인 클래스"""
 
@@ -78,15 +88,18 @@ class AutonomousMappingNode(Node):
         # Allow Nav2's progress checker and recovery tree to finish a bounded
         # spin/backup cycle before the frontier goal is cancelled.
         self.declare_parameter("goal_timeout", 120.0)
-        # Classroom chair and desk legs can leave a valid-looking frontier
-        # path that makes no physical progress. Switch regions promptly instead
-        # of waiting almost a minute at each blocked aisle.
-        self.declare_parameter("goal_progress_timeout", 25.0)
+        # Classroom objects that can move normally do so within about ten
+        # seconds. A stall triggers bounded recovery and another approach; it
+        # does not by itself prove that the entire gray boundary is blocked.
+        self.declare_parameter("goal_progress_timeout", 10.0)
         self.declare_parameter("goal_progress_minimum_delta", 0.10)
         self.declare_parameter("goal_cancel_timeout", 8.0)
         self.declare_parameter("goal_retry_delay", 1.0)
         self.declare_parameter("frontier_plan_timeout", 8.0)
-        self.declare_parameter("maximum_consecutive_goal_failures", 5)
+        # Battery and maximum_runtime bound the run. Dense chair legs can
+        # legitimately produce many isolated navigation failures, so do not
+        # abort the entire exploration based on a global failure count.
+        self.declare_parameter("maximum_consecutive_goal_failures", 0)
         self.declare_parameter("maximum_map_age", 8.0)
         self.declare_parameter("maximum_pose_age", 2.0)
         # A resumed, malformed map previously satisfied the old 60 s / 1 m
@@ -108,14 +121,21 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("maximum_goal_step_distance", 0.75)
         self.declare_parameter("frontier_goal_standoff", 0.35)
         self.declare_parameter("minimum_goal_obstacle_clearance", 0.28)
+        # Explore main classroom aisles first. If no frontier can be reached
+        # with this clearance, fall back to the normal 0.28 m safe path so the
+        # remaining narrow aisles are mapped last instead of skipped.
+        self.declare_parameter("preferred_path_obstacle_clearance", 0.40)
         self.declare_parameter("maximum_robot_free_seed_distance", 0.50)
         self.declare_parameter("maximum_exploration_radius", 25.0)
         self.declare_parameter("blacklist_radius", 0.7)
         self.declare_parameter("staged_goal_blacklist_radius", 0.35)
-        # One Nav2 progress attempt can last 55 seconds. A 20 second blacklist
-        # let the same blocked approach become eligible almost immediately;
-        # retain it long enough to force exploration of another direction.
-        self.declare_parameter("failed_goal_blacklist_seconds", 120.0)
+        # One stalled approach gets a short local cooldown so the same cluster
+        # can offer a different entry point. Only repeated failures suppress
+        # the whole frontier, and even that suppression is short: failed gray
+        # boundaries remain completion blockers and must be retried.
+        self.declare_parameter("stalled_goal_stage_blacklist_seconds", 8.0)
+        self.declare_parameter("frontier_failures_before_cooldown", 3)
+        self.declare_parameter("failed_goal_blacklist_seconds", 20.0)
         # Reaching a gray boundary means that region has already received an
         # exploration attempt. Keep it out of the destination set for the rest
         # of this run; paths to genuinely new frontiers may still cross it.
@@ -157,6 +177,14 @@ class AutonomousMappingNode(Node):
         self.navigator = ActionClient(self, NavigateToPose, "/navigate_to_pose")
         self.path_planner = ActionClient(
             self, ComputePathToPose, "/compute_path_to_pose"
+        )
+        self.global_costmap_clearer = self.create_client(
+            ClearEntireCostmap,
+            "/global_costmap/clear_entirely_global_costmap",
+        )
+        self.local_costmap_clearer = self.create_client(
+            ClearEntireCostmap,
+            "/local_costmap/clear_entirely_local_costmap",
         )
         self.map_saver = self.create_client(SaveMap, "/map_saver/save_map")
         # Some FastDDS runs deliver SLAM's map to Nav2 but not to this Python
@@ -210,6 +238,7 @@ class AutonomousMappingNode(Node):
         self.empty_map_count = 0
         self.active_frontier_count = 0
         self.reachable_frontier_count = 0
+        self.path_priority = "pending"
         self.enabled = bool(self.get_parameter("start_enabled").value)
         self.state = "starting" if self.enabled else "idle"
         self.started_at = self._seconds() if self.enabled else 0.0
@@ -234,6 +263,7 @@ class AutonomousMappingNode(Node):
         self.distance_remaining = None
         self.blacklist: list[tuple[float, float, float, bool]] = []
         self.staged_blacklist: list[tuple[float, float, float]] = []
+        self.frontier_failure_records: list[FrontierFailureRecord] = []
         self.travel_distance = 0.0
         self.last_travel_pose: tuple[float, float] | None = None
         self.save_pending = False
@@ -597,8 +627,10 @@ class AutonomousMappingNode(Node):
         self.last_empty_map_sequence = -1
         self.active_frontier_count = 0
         self.reachable_frontier_count = 0
+        self.path_priority = "pending"
         self.blacklist.clear()
         self.staged_blacklist.clear()
+        self.frontier_failure_records.clear()
         self.goal_cancel_pending = False
         self.goal_cancel_requested_at = 0.0
         self.goal_cancel_reason = ""
@@ -657,6 +689,7 @@ class AutonomousMappingNode(Node):
         payload = {
             "candidate_count": len(candidates),
             "reachable_frontier_count": len(reachable_candidates),
+            "path_priority": self.path_priority,
             "map_quality": (
                 None
                 if self.latest_map_quality is None
@@ -732,13 +765,115 @@ class AutonomousMappingNode(Node):
         ]
         return (
             [(entry[0], entry[1]) for entry in self.blacklist],
-            [(entry[0], entry[1]) for entry in self.staged_blacklist],
             [
                 (entry[0], entry[1])
                 for entry in self.blacklist
                 if not entry[3]
             ],
+            [(entry[0], entry[1]) for entry in self.staged_blacklist],
         )
+
+    def _request_costmap_recovery(self) -> None:
+        """Clear transient LiDAR obstacles before selecting another approach."""
+
+        requested = []
+        for label, client in (
+            ("global", self.global_costmap_clearer),
+            ("local", self.local_costmap_clearer),
+        ):
+            if not client.service_is_ready():
+                continue
+            try:
+                client.call_async(ClearEntireCostmap.Request())
+                requested.append(label)
+            except Exception as error:
+                self.get_logger().warn(
+                    f"could not request {label} costmap recovery: {error}"
+                )
+        if requested:
+            self.get_logger().info(
+                "requested costmap recovery after stalled frontier: "
+                + ", ".join(requested)
+            )
+
+    def _record_frontier_failure(self, candidate) -> tuple[int, int, bool]:
+        """Cool down one approach; suppress the frontier only after retries."""
+
+        now = self._seconds()
+        stage_seconds = float(
+            self.get_parameter("stalled_goal_stage_blacklist_seconds").value
+        )
+        self.staged_blacklist.append(
+            (candidate.x, candidate.y, now + max(0.0, stage_seconds))
+        )
+
+        radius = max(
+            0.05, float(self.get_parameter("blacklist_radius").value)
+        )
+        record = next(
+            (
+                existing
+                for existing in self.frontier_failure_records
+                if math.hypot(
+                    candidate.frontier_x - existing.frontier_x,
+                    candidate.frontier_y - existing.frontier_y,
+                )
+                <= radius
+            ),
+            None,
+        )
+        if record is None:
+            record = FrontierFailureRecord(
+                frontier_x=candidate.frontier_x,
+                frontier_y=candidate.frontier_y,
+            )
+            self.frontier_failure_records.append(record)
+        record.attempts += 1
+        approach_quantum = max(
+            0.05,
+            float(self.get_parameter("staged_goal_blacklist_radius").value),
+        )
+        record.approaches.add(
+            (
+                round(candidate.x / approach_quantum),
+                round(candidate.y / approach_quantum),
+            )
+        )
+
+        threshold = int(
+            self.get_parameter("frontier_failures_before_cooldown").value
+        )
+        whole_frontier_cooldown = (
+            threshold > 0 and record.attempts % threshold == 0
+        )
+        if whole_frontier_cooldown:
+            lifetime = float(
+                self.get_parameter("failed_goal_blacklist_seconds").value
+            )
+            self.blacklist.append(
+                (
+                    candidate.frontier_x,
+                    candidate.frontier_y,
+                    now + max(0.0, lifetime),
+                    True,
+                )
+            )
+        self._request_costmap_recovery()
+        return record.attempts, len(record.approaches), whole_frontier_cooldown
+
+    def _clear_frontier_failure_record(self, candidate) -> None:
+        radius = max(
+            0.05, float(self.get_parameter("blacklist_radius").value)
+        )
+        self.frontier_failure_records = [
+            record
+            for record in self.frontier_failure_records
+            if math.hypot(
+                candidate.frontier_x - record.frontier_x,
+                candidate.frontier_y - record.frontier_y,
+            )
+            > radius
+        ]
 
     def _cancel_active_goal(self, reason: str) -> None:
         if self.goal_handle is None or self.goal_cancel_pending:
@@ -793,8 +928,8 @@ class AutonomousMappingNode(Node):
         max_radius = float(self.get_parameter("maximum_exploration_radius").value)
         (
             active_blacklist,
-            active_staged_blacklist,
             active_reached_blacklist,
+            active_staged_blacklist,
         ) = self._prune_blacklist(self._seconds())
 
         def search(
@@ -803,6 +938,7 @@ class AutonomousMappingNode(Node):
             min_distance: float,
             blacklisted: list[tuple[float, float]],
             staged_blacklisted: list[tuple[float, float]],
+            path_clearance: float,
         ):
             found = frontier_candidates(
                 self.latest_map.data,
@@ -831,6 +967,7 @@ class AutonomousMappingNode(Node):
                 minimum_obstacle_clearance=float(
                     self.get_parameter("minimum_goal_obstacle_clearance").value
                 ),
+                minimum_path_obstacle_clearance=path_clearance,
                 maximum_robot_free_seed_distance=maximum_seed_distance,
             )
             return [
@@ -845,12 +982,36 @@ class AutonomousMappingNode(Node):
             self.get_parameter("minimum_frontier_length").value
         )
         normal_min_cells = max(2, math.ceil(normal_min_length / spec.resolution))
-        candidates = search(
+        safe_path_clearance = float(
+            self.get_parameter("minimum_goal_obstacle_clearance").value
+        )
+        preferred_path_clearance = max(
+            safe_path_clearance,
+            float(
+                self.get_parameter("preferred_path_obstacle_clearance").value
+            ),
+        )
+        wide_candidates = search(
             min_cells=normal_min_cells,
             min_distance=float(self.get_parameter("minimum_goal_distance").value),
             blacklisted=active_blacklist,
             staged_blacklisted=active_staged_blacklist,
+            path_clearance=preferred_path_clearance,
         )
+        if wide_candidates:
+            candidates = wide_candidates
+            self.path_priority = "wide"
+        else:
+            candidates = search(
+                min_cells=normal_min_cells,
+                min_distance=float(
+                    self.get_parameter("minimum_goal_distance").value
+                ),
+                blacklisted=active_blacklist,
+                staged_blacklisted=active_staged_blacklist,
+                path_clearance=safe_path_clearance,
+            )
+            self.path_priority = "narrow_fallback"
 
         # Completion uses a more sensitive search than ordinary goal scoring.
         # This prevents a small but navigable gray boundary from being treated
@@ -867,13 +1028,13 @@ class AutonomousMappingNode(Node):
         reachable_candidates = search(
             min_cells=completion_min_cells,
             min_distance=completion_min_distance,
-            # Failed plans remain completion blockers because costmaps can
-            # settle. Reached boundaries do not: they were already explored
-            # and must not become destinations again. frontier_candidates
-            # compares this list only with the final frontier coordinate, so
-            # a path to new space may still traverse the old region.
+            # Reached regions are no longer exploration destinations. Failed
+            # frontiers and failed staged approaches are intentionally *not*
+            # filtered here: a safely reachable gray boundary must keep the
+            # completion gate open until recovery succeeds or runtime expires.
             blacklisted=active_reached_blacklist,
             staged_blacklisted=[],
+            path_clearance=safe_path_clearance,
         )
         if not candidates:
             candidates = search(
@@ -881,6 +1042,7 @@ class AutonomousMappingNode(Node):
                 min_distance=completion_min_distance,
                 blacklisted=active_blacklist,
                 staged_blacklisted=active_staged_blacklist,
+                path_clearance=safe_path_clearance,
             )
 
         self.active_frontier_count = len(candidates)
@@ -893,6 +1055,10 @@ class AutonomousMappingNode(Node):
             self._request_map_save(pending_reason)
         if not self.enabled:
             return
+        # Renew the finite robot-side ownership lease on every decision tick.
+        # Fresh Nav2 commands also renew it at the bridge, so CPU-heavy
+        # frontier clustering cannot silently release motor ownership.
+        self._set_navigation_mode(True)
         now = self._seconds()
         minimum_battery = int(
             self.get_parameter("minimum_battery_percent").value
@@ -1190,15 +1356,26 @@ class AutonomousMappingNode(Node):
         self.plan_request_pending = False
         self.plan_candidate = None
         self.plan_context = None
+        recovery = None
         if candidate is not None:
-            self._blacklist_candidate(candidate, True)
+            recovery = self._record_frontier_failure(candidate)
         if not self.enabled:
             return
         self.next_goal_not_before = self._seconds() + min(
             1.0, float(self.get_parameter("goal_retry_delay").value)
         )
         self.state = "frontier_inaccessible"
-        self._publish_status(f"{message}; checking another gray boundary")
+        recovery_message = ""
+        if recovery is not None:
+            attempts, approaches, whole_frontier_cooldown = recovery
+            recovery_message = (
+                f"; recovery attempt {attempts} from {approaches} approach(es)"
+            )
+            if whole_frontier_cooldown:
+                recovery_message += "; short frontier cooldown"
+        self._publish_status(
+            f"{message}{recovery_message}; checking another gray boundary"
+        )
 
     def _send_goal(self, candidate, robot_x: float, robot_y: float, count: int) -> None:
         goal = NavigateToPose.Goal()
@@ -1284,6 +1461,9 @@ class AutonomousMappingNode(Node):
     def _blacklist_candidate(self, candidate, failed: bool) -> None:
         if candidate is None:
             return
+        if failed:
+            self._record_frontier_failure(candidate)
+            return
         lifetime_name = (
             "failed_goal_blacklist_seconds"
             if failed
@@ -1303,9 +1483,15 @@ class AutonomousMappingNode(Node):
         self.goal_candidate = None
 
     def _finish_goal_failure(self, message: str) -> None:
-        """Blacklist one bad region and stop safely after repeated failures."""
+        """Recover from one bad approach without hiding remaining gray space."""
 
-        self._blacklist_current(True)
+        candidate = self.goal_candidate
+        self.goal_candidate = None
+        recovery = (
+            self._record_frontier_failure(candidate)
+            if candidate is not None
+            else None
+        )
         self.distance_remaining = None
         self.goal_cancel_pending = False
         self.goal_cancel_requested_at = 0.0
@@ -1329,9 +1515,18 @@ class AutonomousMappingNode(Node):
             self.get_parameter("goal_retry_delay").value
         )
         self.state = "goal_failed"
+        recovery_message = ""
+        if recovery is not None:
+            attempts, approaches, whole_frontier_cooldown = recovery
+            recovery_message = (
+                f"; recovery attempt {attempts} from {approaches} approach(es)"
+            )
+            if whole_frontier_cooldown:
+                recovery_message += "; short frontier cooldown"
+        limit = str(maximum_failures) if maximum_failures > 0 else "unlimited"
         self._publish_status(
-            f"{message}; retry {self.consecutive_goal_failures}/{maximum_failures} "
-            "after cooldown"
+            f"{message}{recovery_message}; consecutive failures "
+            f"{self.consecutive_goal_failures}/{limit}; retrying"
         )
 
     def _on_goal_result(self, future, generation: int) -> None:
@@ -1352,6 +1547,8 @@ class AutonomousMappingNode(Node):
         if not succeeded:
             self._finish_goal_failure(f"frontier failed with status={status}")
             return
+        if self.goal_candidate is not None:
+            self._clear_frontier_failure_record(self.goal_candidate)
         self._blacklist_current(False)
         self.distance_remaining = None
         self.goal_progress = None
@@ -1500,6 +1697,7 @@ class AutonomousMappingNode(Node):
             "empty_map_count": self.empty_map_count,
             "active_frontier_count": self.active_frontier_count,
             "reachable_frontier_count": self.reachable_frontier_count,
+            "path_priority": self.path_priority,
             "distance_remaining": self.distance_remaining,
             "saved_map": self.saved_map,
             "saved_pose": self.saved_pose,

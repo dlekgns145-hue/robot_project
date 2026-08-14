@@ -65,6 +65,8 @@ def legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "mapping_stop",
         "mapping_save",
         "mapping_preview",
+        "follow_start",
+        "follow_stop",
     }:
         return {"type": command_type}
     if command_type == "navigate":

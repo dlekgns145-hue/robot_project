@@ -106,7 +106,7 @@ def generate_launch_description():
                 "mapping_maximum_radius", default_value="12.0"
             ),
             DeclareLaunchArgument(
-                "mapping_goal_progress_timeout", default_value="25.0"
+                "mapping_goal_progress_timeout", default_value="10.0"
             ),
             DeclareLaunchArgument(
                 "mapping_maximum_map_age", default_value="8.0"

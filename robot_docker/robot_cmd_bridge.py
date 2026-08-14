@@ -55,6 +55,7 @@ PORT = 9999
 COMMAND_TIMEOUT = 0.5
 SERVER_COMMAND_TIMEOUT = float(os.getenv("SERVER_COMMAND_TIMEOUT_SEC", "0.5"))
 SERVER_MAX_LINEAR_SPEED = float(os.getenv("SERVER_MAX_LINEAR_SPEED", "0.12"))
+SERVER_MIN_LINEAR_SPEED = float(os.getenv("SERVER_MIN_LINEAR_SPEED", "0.04"))
 SERVER_MAX_ANGULAR_SPEED = float(os.getenv("SERVER_MAX_ANGULAR_SPEED", "0.18"))
 SERVER_MIN_ANGULAR_SPEED = float(os.getenv("SERVER_MIN_ANGULAR_SPEED", "0.18"))
 SERVER_PURE_ROTATION_LINEAR_EPSILON = float(
@@ -139,6 +140,16 @@ def shape_server_velocity(linear: float, angular: float) -> tuple[float, float]:
     angular = max(
         -SERVER_MAX_ANGULAR_SPEED, min(SERVER_MAX_ANGULAR_SPEED, angular)
     )
+    # The physical base does not overcome drivetrain friction at the 0.013 m/s
+    # commands produced by the smoother near a frontier. Preserve true zeros
+    # and pure-rotation requests, but lift an intentional translation above
+    # the measured startup deadzone. The local LiDAR/camera gate below still
+    # blocks this command whenever the direction is unsafe.
+    if (
+        abs(linear) > SERVER_PURE_ROTATION_LINEAR_EPSILON
+        and abs(linear) < SERVER_MIN_LINEAR_SPEED
+    ):
+        linear = math.copysign(SERVER_MIN_LINEAR_SPEED, linear)
     if abs(linear) <= SERVER_PURE_ROTATION_LINEAR_EPSILON:
         if 0.0 < abs(angular) < SERVER_MIN_ANGULAR_SPEED:
             angular = math.copysign(SERVER_MIN_ANGULAR_SPEED, angular)
@@ -252,6 +263,10 @@ class CmdBridgeNode(Node):
                 Trigger, "/autonomous_mapping/preview"
             ),
         }
+        self.follow_clients = {
+            "follow_start": self.create_client(Trigger, "/follow_person/start"),
+            "follow_stop": self.create_client(Trigger, "/follow_person/stop"),
+        }
         self.control_timer = self.create_timer(0.1, self.control_loop)
         self.create_timer(1.0, self._set_initial_tilt_once)
         self.create_timer(2.0, self._report_runtime_health)
@@ -319,6 +334,29 @@ class CmdBridgeNode(Node):
             raise RuntimeError("mapping service returned no response")
         if not response.success:
             raise RuntimeError(str(response.message or "mapping command rejected"))
+        return str(response.message or command_type)
+
+    def follow_command(self, command_type: str, timeout: float = 3.0):
+        client = self.follow_clients.get(command_type)
+        if client is None:
+            raise ValueError(f"unsupported follow command: {command_type}")
+        if not client.wait_for_service(timeout_sec=0.4):
+            raise RuntimeError(
+                "follow-runtime이 실행되지 않았습니다. follow-runtime을 먼저 시작하세요."
+            )
+        future = client.call_async(Trigger.Request())
+        completed = threading.Event()
+        future.add_done_callback(lambda _future: completed.set())
+        if not completed.wait(timeout):
+            raise TimeoutError("follow service response timeout")
+        try:
+            response = future.result()
+        except Exception as error:
+            raise RuntimeError(f"follow service failed: {error}") from error
+        if response is None:
+            raise RuntimeError("follow service returned no response")
+        if not response.success:
+            raise RuntimeError(str(response.message or "follow command rejected"))
         return str(response.message or command_type)
 
     def _amcl_pose_callback(self, message: PoseWithCovarianceStamped):
@@ -479,12 +517,19 @@ class CmdBridgeNode(Node):
             self.get_logger().error("서버 속도 명령에 NaN/Inf가 있어 폐기함")
             return
         linear, angular = shape_server_velocity(linear, angular)
+        now = time.monotonic()
         with self.lock:
             if not self.navigation_mode:
                 return
             self.server_linear = linear
             self.server_angular = angular
-            self.last_server_cmd_at = time.monotonic()
+            self.last_server_cmd_at = now
+            # An explicit mapping lease authorizes this navigation session.
+            # Once authorized, fresh Nav2 commands are also proof that the
+            # owner is alive; refresh ownership independently of the mapper's
+            # CPU-heavy frontier clustering callback.
+            if self.navigation_lease_active:
+                self.last_navigation_lease_at = now
 
     def navigation_lease_callback(self, message: Bool):
         """Own motors while the compute mapper renews a short-lived lease."""
@@ -1077,6 +1122,20 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
     }:
         try:
             message = node.mapping_command(command_type)
+            response["command_result"] = {
+                "type": command_type,
+                "ok": True,
+                "message": message,
+            }
+        except (RuntimeError, TimeoutError, ValueError) as error:
+            response["command_result"] = {
+                "type": command_type,
+                "ok": False,
+                "message": str(error),
+            }
+    elif command_type in {"follow_start", "follow_stop"}:
+        try:
+            message = node.follow_command(command_type)
             response["command_result"] = {
                 "type": command_type,
                 "ok": True,

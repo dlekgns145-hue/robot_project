@@ -39,12 +39,28 @@ case "${1:-}" in
             --ros-args \
             -p camera_url:="${ROBOT_CAMERA_URL:-http://127.0.0.1:8080/stream.mjpg}"
         ;;
+    person-detect)
+        exec python3 /opt/robot-control/perception/detect.py \
+            --ros-args \
+            -p camera_topic:="${FOLLOW_CAMERA_TOPIC:-/camera/image_raw}" \
+            -p model_path:=/opt/robot-control/perception/best.pt \
+            -p tracker_config:=/opt/robot-control/perception/botsort_reid.yaml \
+            -p face_detector_path:=/opt/robot-control/perception/face_detection_yunet.onnx \
+            -p face_recognizer_path:=/opt/robot-control/perception/face_recognition_sface.onnx \
+            -p show_debug_window:=false
+        ;;
+    follow)
+        exec python3 /opt/robot-control/follow/follow_person.py \
+            --ros-args \
+            -p linear_speed:="${FOLLOW_LINEAR_SPEED:-0.2}" \
+            -p angular_speed:="${FOLLOW_ANGULAR_SPEED:-0.4}"
+        ;;
     mapping|mapping-server)
         exec ros2 launch /opt/robot-control/navigation/mapping_runtime_launch.py \
             map_output:="${ROBOT_MAP_OUTPUT:-/opt/robot-control/maps/orchard_map}" \
             mapping_maximum_runtime:="${ROBOT_MAPPING_MAXIMUM_RUNTIME:-1800.0}" \
             mapping_maximum_radius:="${ROBOT_MAPPING_MAXIMUM_RADIUS:-12.0}" \
-            mapping_goal_progress_timeout:="${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-25.0}" \
+            mapping_goal_progress_timeout:="${ROBOT_MAPPING_GOAL_PROGRESS_TIMEOUT:-10.0}" \
             mapping_maximum_map_age:="${ROBOT_MAPPING_MAXIMUM_MAP_AGE:-8.0}" \
             mapping_minimum_save_known_area:="${ROBOT_MAPPING_MINIMUM_SAVE_KNOWN_AREA:-1.0}" \
             mapping_minimum_save_free_area:="${ROBOT_MAPPING_MINIMUM_SAVE_FREE_AREA:-0.5}"
@@ -82,7 +98,7 @@ case "${1:-}" in
             params_file:="${runtime_params}"
         ;;
     *)
-        echo "usage: entrypoint.sh {bringup|base|bridge|camera|camera-safety|mapping|mapping-server|map-postprocessor|navigation}" >&2
+        echo "usage: entrypoint.sh {bringup|base|bridge|camera|camera-safety|person-detect|follow|mapping|mapping-server|map-postprocessor|navigation}" >&2
         exit 2
         ;;
 esac

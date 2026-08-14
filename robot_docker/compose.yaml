@@ -107,11 +107,16 @@ services:
       # CycloneDDS override.
       SERVER_COMMAND_TIMEOUT_SEC: "0.5"
       SERVER_MAX_LINEAR_SPEED: "0.12"
+      SERVER_MIN_LINEAR_SPEED: "0.04"
       SERVER_MAX_ANGULAR_SPEED: "0.18"
       SERVER_MIN_ANGULAR_SPEED: "0.18"
       SERVER_PURE_ROTATION_LINEAR_EPSILON: "0.01"
       SERVER_DRIVING_ANGULAR_DEADBAND: "0.03"
-      NAVIGATION_LEASE_TIMEOUT_SEC: "2.5"
+      # Frontier clustering can take several seconds once a classroom map is
+      # large. Velocity commands still expire independently after 0.5 s, so a
+      # longer ownership lease prevents false release without allowing stale
+      # motion to continue.
+      NAVIGATION_LEASE_TIMEOUT_SEC: "10.0"
 
   camera:
     <<: *ros-service
@@ -130,6 +135,49 @@ services:
     command: ["camera-safety"]
     depends_on:
       - camera
+
+  # Explicit profile: YOLO person detection publishes to /person_detection but
+  # never touches /cmd_vel by itself -- follow-runtime is the one that moves.
+  person-detect:
+    <<: *ros-service
+    container_name: robot-person-detect
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
+    command: ["person-detect"]
+    profiles: [follow]
+    environment:
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
+      FOLLOW_CAMERA_TOPIC: "${FOLLOW_CAMERA_TOPIC:-/camera/image_raw}"
+    depends_on:
+      - camera
+
+  # Explicit profile: never starts following during a normal boot. Same
+  # reasoning as mapping-runtime -- a voice command must call
+  # /follow_person/start before the robot will move toward anyone
+  # (enabled=False by default in follow_person.py).
+  follow-runtime:
+    <<: *ros-service
+    container_name: robot-follow-runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
+    command: ["follow"]
+    profiles: [follow]
+    environment:
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
+      FOLLOW_LINEAR_SPEED: "${FOLLOW_LINEAR_SPEED:-0.2}"
+      FOLLOW_ANGULAR_SPEED: "${FOLLOW_ANGULAR_SPEED:-0.4}"
+    depends_on:
+      - agent
+      - base
+      - person-detect
 
   # Explicit profile: never starts autonomous mapping during a normal boot.
   # The explorer itself also waits for /autonomous_mapping/start.
