@@ -1,0 +1,19 @@
+# 가상환경
+apple_env/
+apple_env_backup/
+venv/
+
+# 캐시
+__pycache__/
+*.pyc
+
+# 대용량 미디어 (필요시 별도 관리)
+*.mp4
+*.avi
+
+# 결과물 폴더
+runs/
+
+# OS 관련
+.DS_Store
+Thumbs.db
