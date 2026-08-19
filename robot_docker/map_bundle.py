@@ -19,6 +19,19 @@ MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
+RAW_MAP_FILES = (
+    "orchard_map.pgm",
+    "orchard_map.yaml",
+    "orchard_map_pose.json",
+    "orchard_map_slam.posegraph",
+    "orchard_map_slam.data",
+    "orchard_map_slam_manifest.json",
+    "last_pose.json",
+    "startup_check.pgm",
+    "startup_check.yaml",
+)
+LEGACY_MAP_DIRECTORIES = ("validation_1m",)
+
 
 def _atomic_write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +186,37 @@ def _map_yaml(metadata: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _prune_robot_map_backups(root: Path, active_target: Path) -> None:
+    """Keep only the active corrected map/pose bundle on the robot.
+
+    Raw files are retained until a server-corrected bundle has been validated
+    and atomically activated.  At that point the server is the durable store,
+    so old corrected versions, raw maps, and SLAM resume data are removed.
+    """
+
+    corrected_root = root / "corrected"
+    if corrected_root.is_dir():
+        for candidate in corrected_root.iterdir():
+            if candidate == active_target:
+                continue
+            if candidate.is_dir() and not candidate.is_symlink():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink(missing_ok=True)
+
+    for name in RAW_MAP_FILES:
+        candidate = root / name
+        if candidate.is_file() or candidate.is_symlink():
+            candidate.unlink()
+
+    for name in LEGACY_MAP_DIRECTORIES:
+        candidate = root / name
+        if candidate.is_dir() and not candidate.is_symlink():
+            shutil.rmtree(candidate)
+        elif candidate.is_symlink():
+            candidate.unlink()
+
+
 def install_navigation_bundle(
     bundle: dict[str, Any], map_directory: str
 ) -> dict[str, Any]:
@@ -231,6 +275,7 @@ def install_navigation_bundle(
         root / "navigation_bundle_status.json",
         (json.dumps(manifest, separators=(",", ":")) + "\n").encode(),
     )
+    _prune_robot_map_backups(root, target)
     return manifest
 
 

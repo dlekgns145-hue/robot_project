@@ -98,6 +98,17 @@ REAR_HOUSING_MAX_RANGE_M = 0.16
 CAMERA_STALE_SEC = 1.0
 CAMERA_STOP_DISTANCE_M = 0.45
 CAMERA_CRITICAL_DISTANCE_M = 0.30
+# Above SERVER_MIN_LINEAR_SPEED's measured startup deadzone floor so a creep
+# command actually overcomes drivetrain friction instead of stalling in
+# place, but still far below normal driving speed.
+CAMERA_CRITICAL_CREEP_SPEED = 0.05
+# The full 70-degree camera scan belongs in Nav2's local costmap so DWB can
+# steer around chair and desk legs.  The bridge is only the last-resort hard
+# stop and must not collapse that spatial information into one broad
+# "anything within 30 degrees stops all translation" decision.  Keep its
+# independent stop corridor around the image centre; side obstacles remain in
+# the costmap and are handled by trajectory collision checking.
+CAMERA_HARD_STOP_HALF_ANGLE_DEG = 12.0
 
 SMOOTHING_WINDOW = 5
 
@@ -106,9 +117,9 @@ STUCK_TIMEOUT_SEC = 4.0  # 이 시간 넘게 NORMAL로 못 돌아오면 "갇혔�
 ESCAPE_ANGULAR_SPEED = 0.4  # 탈출 회전 속도
 ESCAPE_TURN_TIME_SEC = 2.5  # 이 시간 동안 LiDAR 무시하고 무조건 회전
 
-# Raised from the -80 ground-facing angle used for the overlay test; that
-# angle pointed too far down for normal driving/monitoring use.
-SERVO_TILT_DEFAULT = -50
+# Keep the near floor and low steps visible while retaining enough forward
+# view for normal driving in the classroom.
+SERVO_TILT_DEFAULT = -65
 SERVO_PAN_MIN = -60
 SERVO_PAN_MAX = 60
 
@@ -167,6 +178,9 @@ class CmdBridgeNode(Node):
         self.emergency_pub = self.create_publisher(
             Bool, "/cmd_bridge/emergency_stop", 10
         )
+        self.safety_status_pub = self.create_publisher(
+            String, "/cmd_bridge/safety_status", 10
+        )
 
         self.lock = threading.Lock()
 
@@ -205,13 +219,28 @@ class CmdBridgeNode(Node):
         self._last_pose_saved_at = 0.0
         self._last_pose_save_error_at = 0.0
         self._navigation_bundle = self._load_navigation_bundle_status()
+        self._loadcell_status = {
+            "connected": False,
+            "grams": None,
+            "state": "unavailable",
+            "low_threshold_g": None,
+            "high_threshold_g": None,
+            "age_s": None,
+        }
 
         self.front_blocked = False
         self.front_min_dist = 10.0
         self.rear_min_dist = 10.0
         self._last_scan_at = 0.0
         self.camera_front_min_dist = float("inf")
+        self.camera_nearest_dist = float("inf")
+        self.camera_nearest_bearing_deg = None
         self._last_camera_scan_at = 0.0
+        self._navigation_safety_reason = "inactive"
+        self._requested_navigation_linear = 0.0
+        self._requested_navigation_angular = 0.0
+        self._output_navigation_linear = 0.0
+        self._output_navigation_angular = 0.0
 
         self.left_history = deque(maxlen=SMOOTHING_WINDOW)
         self.right_history = deque(maxlen=SMOOTHING_WINDOW)
@@ -235,6 +264,9 @@ class CmdBridgeNode(Node):
             Twist, "/cmd_vel_server", self.server_cmd_callback, 10
         )
         self.create_subscription(
+            Twist, "/cmd_vel_follow", self.follow_cmd_callback, 10
+        )
+        self.create_subscription(
             Bool, "/cmd_bridge/navigation_lease", self.navigation_lease_callback, 10
         )
         self.create_subscription(
@@ -247,6 +279,12 @@ class CmdBridgeNode(Node):
             String,
             "/autonomous_mapping/status",
             self._mapping_status_callback,
+            mapping_qos,
+        )
+        self.create_subscription(
+            String,
+            "/loadcell_guard/status",
+            self._loadcell_status_callback,
             mapping_qos,
         )
         self.mapping_clients = {
@@ -267,7 +305,14 @@ class CmdBridgeNode(Node):
             "follow_start": self.create_client(Trigger, "/follow_person/start"),
             "follow_stop": self.create_client(Trigger, "/follow_person/stop"),
         }
+        self.follow_reset_target_client = self.create_client(
+            Trigger, "/person_detection/reset_target"
+        )
+        self.person_detection_pause_client = self.create_client(
+            Trigger, "/person_detection/pause"
+        )
         self.control_timer = self.create_timer(0.1, self.control_loop)
+        self.create_timer(0.5, self._publish_navigation_safety_status)
         self.create_timer(1.0, self._set_initial_tilt_once)
         self.create_timer(2.0, self._report_runtime_health)
         self.create_service(
@@ -289,6 +334,20 @@ class CmdBridgeNode(Node):
     def mapping_snapshot(self):
         with self.lock:
             return dict(self._mapping_status)
+
+    def _loadcell_status_callback(self, message: String):
+        try:
+            payload = json.loads(message.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        with self.lock:
+            self._loadcell_status = payload
+
+    def loadcell_snapshot(self):
+        with self.lock:
+            return dict(self._loadcell_status)
 
     @staticmethod
     def _load_navigation_bundle_status():
@@ -336,28 +395,55 @@ class CmdBridgeNode(Node):
             raise RuntimeError(str(response.message or "mapping command rejected"))
         return str(response.message or command_type)
 
-    def follow_command(self, command_type: str, timeout: float = 3.0):
-        client = self.follow_clients.get(command_type)
-        if client is None:
-            raise ValueError(f"unsupported follow command: {command_type}")
+    @staticmethod
+    def _call_trigger(client, not_ready_message: str, timeout: float = 3.0):
         if not client.wait_for_service(timeout_sec=0.4):
-            raise RuntimeError(
-                "follow-runtime이 실행되지 않았습니다. follow-runtime을 먼저 시작하세요."
-            )
+            raise RuntimeError(not_ready_message)
         future = client.call_async(Trigger.Request())
         completed = threading.Event()
         future.add_done_callback(lambda _future: completed.set())
         if not completed.wait(timeout):
-            raise TimeoutError("follow service response timeout")
+            raise TimeoutError("service response timeout")
         try:
             response = future.result()
         except Exception as error:
-            raise RuntimeError(f"follow service failed: {error}") from error
+            raise RuntimeError(f"service call failed: {error}") from error
         if response is None:
-            raise RuntimeError("follow service returned no response")
+            raise RuntimeError("service returned no response")
         if not response.success:
-            raise RuntimeError(str(response.message or "follow command rejected"))
-        return str(response.message or command_type)
+            raise RuntimeError(str(response.message or "command rejected"))
+        return str(response.message or "")
+
+    def follow_command(self, command_type: str, timeout: float = 3.0):
+        client = self.follow_clients.get(command_type)
+        if client is None:
+            raise ValueError(f"unsupported follow command: {command_type}")
+        if command_type == "follow_start":
+            # "따라와" = 말한 사람이 카메라에서 제일 가까운 사람이라고 가정하고,
+            # 매번 새로 시작할 때마다 이전에 따라가던 대상 정보를 지운다.
+            self._call_trigger(
+                self.follow_reset_target_client,
+                "person-detect가 실행되지 않았습니다. person-detect를 먼저 시작하세요.",
+                timeout,
+            )
+        message = self._call_trigger(
+            client,
+            "follow-runtime이 실행되지 않았습니다. follow-runtime을 먼저 시작하세요.",
+            timeout,
+        )
+        if command_type == "follow_stop":
+            if self.person_detection_pause_client.wait_for_service(timeout_sec=0.2):
+                try:
+                    self._call_trigger(
+                        self.person_detection_pause_client,
+                        "person detection pause service unavailable",
+                        timeout,
+                    )
+                except Exception as error:
+                    self.get_logger().warn(
+                        f"person detection could not be paused: {error}"
+                    )
+        return message or command_type
 
     def _amcl_pose_callback(self, message: PoseWithCovarianceStamped):
         pose = message.pose.pose
@@ -492,13 +578,27 @@ class CmdBridgeNode(Node):
             self.right_history.append(sum(right_dists) / len(right_dists))
 
     def camera_scan_callback(self, msg: LaserScan):
-        """Track low obstacles detected by the robot-local camera guard."""
+        """Track camera obstacles in the narrow emergency-stop corridor.
 
-        front_range_rad = math.radians(FRONT_ANGLE_RANGE_DEG)
+        The complete scan is consumed by Nav2.  Using the former +/-30 degree
+        minimum here made a desk leg at the edge of the view stop every
+        forward trajectory, including trajectories that curved away from it.
+        """
+
+        front_range_rad = math.radians(CAMERA_HARD_STOP_HALF_ANGLE_DEG)
         distances = []
+        nearest_distance = float("inf")
+        nearest_bearing = None
         for index, raw_distance in enumerate(msg.ranges):
             distance = float(raw_distance)
             angle = msg.angle_min + index * msg.angle_increment
+            if (
+                math.isfinite(distance)
+                and distance >= max(0.0, float(msg.range_min))
+                and distance < nearest_distance
+            ):
+                nearest_distance = distance
+                nearest_bearing = math.degrees(angle)
             if (
                 -front_range_rad <= angle <= front_range_rad
                 and math.isfinite(distance)
@@ -506,7 +606,59 @@ class CmdBridgeNode(Node):
             ):
                 distances.append(distance)
         self.camera_front_min_dist = min(distances, default=float("inf"))
+        self.camera_nearest_dist = nearest_distance
+        self.camera_nearest_bearing_deg = nearest_bearing
         self._last_camera_scan_at = time.monotonic()
+
+    @staticmethod
+    def _finite_or_none(value):
+        value = float(value)
+        return round(value, 4) if math.isfinite(value) else None
+
+    def _record_navigation_safety(
+        self,
+        reason: str,
+        requested_linear: float,
+        requested_angular: float,
+        output_linear: float,
+        output_angular: float,
+    ) -> None:
+        self._navigation_safety_reason = reason
+        self._requested_navigation_linear = requested_linear
+        self._requested_navigation_angular = requested_angular
+        self._output_navigation_linear = output_linear
+        self._output_navigation_angular = output_angular
+
+    def _publish_navigation_safety_status(self) -> None:
+        with self.lock:
+            navigation_mode = self.navigation_mode
+        reason = self._navigation_safety_reason if navigation_mode else "inactive"
+        message = String()
+        message.data = json.dumps(
+            {
+                "navigation_mode": navigation_mode,
+                "reason": reason,
+                "requested_linear": round(self._requested_navigation_linear, 4),
+                "requested_angular": round(self._requested_navigation_angular, 4),
+                "output_linear": round(self._output_navigation_linear, 4),
+                "output_angular": round(self._output_navigation_angular, 4),
+                "lidar_front_m": self._finite_or_none(self.front_min_dist),
+                "lidar_rear_m": self._finite_or_none(self.rear_min_dist),
+                "camera_hard_stop_m": self._finite_or_none(
+                    self.camera_front_min_dist
+                ),
+                "camera_nearest_m": self._finite_or_none(
+                    self.camera_nearest_dist
+                ),
+                "camera_nearest_bearing_deg": (
+                    None
+                    if self.camera_nearest_bearing_deg is None
+                    else round(float(self.camera_nearest_bearing_deg), 2)
+                ),
+            },
+            separators=(",", ":"),
+        )
+        self.safety_status_pub.publish(message)
 
     def server_cmd_callback(self, msg: Twist):
         """Accept a short-lived velocity lease from the compute server."""
@@ -530,6 +682,27 @@ class CmdBridgeNode(Node):
             # CPU-heavy frontier clustering callback.
             if self.navigation_lease_active:
                 self.last_navigation_lease_at = now
+
+    def follow_cmd_callback(self, msg: Twist):
+        """Relay follow_person.py's velocity through the GUI drive path.
+
+        follow_person.py used to publish straight to /cmd_vel, contending
+        with this node's own publisher there. It also cannot use
+        /cmd_vel_server -- that topic is gated to navigation_mode (Nav2/
+        mapping), which is off while following, so the command would be
+        silently dropped. Routing through publish_cmd() instead makes
+        follow just another source of desired_linear/desired_angular, the
+        same as a GUI joystick command -- it gets the same navigation_mode
+        exclusivity, the same LiDAR avoid-state obstacle avoidance, and the
+        same command-timeout safety stop if follow_person.py goes silent.
+        """
+
+        linear = float(msg.linear.x)
+        angular = float(msg.angular.z)
+        if not math.isfinite(linear) or not math.isfinite(angular):
+            self.get_logger().error("follow 속도 명령에 NaN/Inf가 있어 폐기함")
+            return
+        self.publish_cmd(linear, angular)
 
     def navigation_lease_callback(self, message: Bool):
         """Own motors while the compute mapper renews a short-lived lease."""
@@ -749,26 +922,68 @@ class CmdBridgeNode(Node):
             linear = self.server_linear
             angular = self.server_angular
         scan_age = now - self._last_scan_at
-        if command_age > SERVER_COMMAND_TIMEOUT or scan_age > LIDAR_STALE_SEC:
+        if command_age > SERVER_COMMAND_TIMEOUT:
+            self._record_navigation_safety(
+                "command_stale", linear, angular, 0.0, 0.0
+            )
+            self.pub.publish(twist)
+            return
+        if scan_age > LIDAR_STALE_SEC:
+            self._record_navigation_safety(
+                "lidar_stale", linear, angular, 0.0, 0.0
+            )
             self.pub.publish(twist)
             return
 
         camera_distance = float("inf")
         if now - self._last_camera_scan_at <= CAMERA_STALE_SEC:
             camera_distance = self.camera_front_min_dist
-        if camera_distance < CAMERA_CRITICAL_DISTANCE_M:
-            self.pub.publish(twist)
-            return
+        # A circular footprint can safely turn in place without getting any
+        # closer to a front obstacle, so pure rotation is exempt below.
+        # Full stop for any translation at this range treated an uncertain
+        # camera reading as an absolute wall regardless of direction, and
+        # combined with Nav2's own spin collision check also refusing
+        # rotation in the same tight quarters, the robot had no automatic
+        # way out at all -- confirmed 2026-08-19 both by a real desk leg at
+        # this exact range (LiDAR-corroborated) and by a camera-only false
+        # positive at the same range with LiDAR clear, on the same stretch a
+        # manual driver had already proven passable the day before with
+        # slow, careful nudges. Creep through/away at a bounded low speed
+        # instead of stopping dead; LiDAR's own front/rear gates below are
+        # unaffected and still hard-stop on their own reading.
+        camera_creeping = False
+        if (
+            camera_distance < CAMERA_CRITICAL_DISTANCE_M
+            and abs(linear) > SERVER_PURE_ROTATION_LINEAR_EPSILON
+        ):
+            linear = math.copysign(
+                min(abs(linear), CAMERA_CRITICAL_CREEP_SPEED), linear
+            )
+            camera_creeping = True
 
-        nearest_front = min(self.front_min_dist, camera_distance)
-        if linear > 0.0 and nearest_front < max(
-            OBSTACLE_STOP_DISTANCE_M, CAMERA_STOP_DISTANCE_M
+        reason = "camera_critical_creep" if camera_creeping else "clear"
+        if linear > 0.0 and self.front_min_dist < OBSTACLE_STOP_DISTANCE_M:
+            linear = 0.0
+            reason = "lidar_front"
+        elif (
+            linear > 0.0
+            and not camera_creeping
+            and camera_distance < CAMERA_STOP_DISTANCE_M
         ):
             linear = 0.0
+            reason = "camera_front"
         if linear < 0.0 and self.rear_min_dist < OBSTACLE_STOP_DISTANCE_M:
             linear = 0.0
+            reason = "lidar_rear"
         twist.linear.x = linear
         twist.angular.z = angular
+        self._record_navigation_safety(
+            reason,
+            self.server_linear,
+            self.server_angular,
+            twist.linear.x,
+            twist.angular.z,
+        )
         self.pub.publish(twist)
 
     def _set_navigation_mode(self, request, response):
@@ -1162,6 +1377,9 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
     mapping_snapshot = getattr(node, "mapping_snapshot", None)
     if callable(mapping_snapshot):
         response["mapping"] = mapping_snapshot()
+    loadcell_snapshot = getattr(node, "loadcell_snapshot", None)
+    if callable(loadcell_snapshot):
+        response["loadcell"] = loadcell_snapshot()
     return response
 
 

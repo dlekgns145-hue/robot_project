@@ -67,6 +67,43 @@ class RobotNavigationBundleTests(unittest.TestCase):
                 "map-job-1",
             )
 
+    def test_install_keeps_only_active_corrected_map_and_pose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "corrected" / "old-job"
+            old.mkdir(parents=True)
+            (old / "map.pgm").write_bytes(b"old")
+            (root / "orchard_map.pgm").write_bytes(b"raw")
+            (root / "orchard_map.yaml").write_text("raw")
+            (root / "orchard_map_pose.json").write_text("{}")
+            (root / "orchard_map_slam.posegraph").write_bytes(b"graph")
+            (root / "orchard_map_slam.data").write_bytes(b"data")
+            (root / "orchard_map_slam_manifest.json").write_text("{}")
+            (root / "last_pose.json").write_text("{}")
+            validation = root / "validation_1m"
+            validation.mkdir()
+            (validation / "orchard_map.pgm").write_bytes(b"legacy")
+
+            install_navigation_bundle(corrected_bundle(), directory)
+
+            active = (root / "navigation-current").resolve()
+            self.assertEqual(active.name, "map-job-1")
+            self.assertTrue((active / "map.pgm").is_file())
+            self.assertTrue((active / "map.yaml").is_file())
+            self.assertTrue((active / "pose.json").is_file())
+            self.assertFalse(old.exists())
+            for name in (
+                "orchard_map.pgm",
+                "orchard_map.yaml",
+                "orchard_map_pose.json",
+                "orchard_map_slam.posegraph",
+                "orchard_map_slam.data",
+                "orchard_map_slam_manifest.json",
+                "last_pose.json",
+            ):
+                self.assertFalse((root / name).exists())
+            self.assertFalse(validation.exists())
+
     def test_checksum_mismatch_is_rejected_before_any_install(self) -> None:
         bundle = corrected_bundle()
         bundle["corrected_sha256"] = "0" * 64

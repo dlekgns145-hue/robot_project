@@ -1,0 +1,203 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1240" viewBox="0 0 1800 1240" role="img" aria-labelledby="title desc">
+  <title id="title">OrX 로봇 시스템 아키텍처</title>
+  <desc id="desc">Android 앱, Ubuntu 서버, Raspberry Pi 로봇의 구성요소와 TCP JSON Lines, HTTP MJPEG, ROS 2 DDS, micro-ROS, 로드셀 GPIO 통신 구조</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7FAFF"/>
+      <stop offset="1" stop-color="#EEF4FC"/>
+    </linearGradient>
+    <linearGradient id="appHead" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#166534"/>
+      <stop offset="1" stop-color="#22C55E"/>
+    </linearGradient>
+    <linearGradient id="serverHead" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1E3A8A"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <linearGradient id="robotHead" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9A3412"/>
+      <stop offset="1" stop-color="#F97316"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="9" stdDeviation="12" flood-color="#0F172A" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#2563EB"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#16A34A"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#EA580C"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#7C3AED"/>
+    </marker>
+    <style>
+      text { font-family: "Pretendard", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif; fill: #172033; }
+      .panel-title { font-size: 31px; font-weight: 800; fill: white; }
+      .panel-sub { font-size: 17px; font-weight: 600; fill: #EAF2FF; }
+      .card-title { font-size: 20px; font-weight: 800; }
+      .body { font-size: 16px; font-weight: 550; }
+      .small { font-size: 14px; font-weight: 550; }
+      .arrow-label { font-size: 16px; font-weight: 800; }
+      .muted { fill: #667085; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1240" fill="url(#bg)"/>
+  <circle cx="1660" cy="100" r="230" fill="#DBEAFE" opacity="0.38"/>
+  <circle cx="130" cy="1040" r="260" fill="#DCFCE7" opacity="0.32"/>
+
+  <text x="900" y="62" text-anchor="middle" font-size="38" font-weight="900" fill="#0F1D35">OrX 로봇 시스템 아키텍처</text>
+  <text x="900" y="94" text-anchor="middle" font-size="17" font-weight="650" class="muted">웹 시스템 제외 · Android 앱 / Ubuntu 서버 / 실물 로봇</text>
+
+  <!-- APP -->
+  <g filter="url(#shadow)">
+    <rect x="55" y="145" width="430" height="775" rx="25" fill="white" stroke="#86C99B" stroke-width="2"/>
+    <path d="M80 145 H460 Q485 145 485 170 V245 H55 V170 Q55 145 80 145 Z" fill="url(#appHead)"/>
+  </g>
+  <text x="88" y="191" class="panel-title">① Android 앱</text>
+  <text x="88" y="222" class="panel-sub">Robot Companion · Java 17</text>
+
+  <rect x="82" y="278" width="376" height="120" rx="16" fill="#F0FDF4" stroke="#86EFAC"/>
+  <text x="106" y="311" class="card-title" fill="#166534">사용자 인터페이스</text>
+  <text x="106" y="342" class="body">수동 운전 · 긴급 정지 · Follow Me</text>
+  <text x="106" y="370" class="body">카메라 화면 · 로봇 연결/속도 상태</text>
+
+  <rect x="82" y="419" width="376" height="118" rx="16" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="106" y="453" class="card-title">TCP 로봇 클라이언트</text>
+  <text x="106" y="484" class="body">100 ms 명령/상태 heartbeat</text>
+  <text x="106" y="512" class="body">자동 재연결 · 연결 끊김 안전 정지</text>
+
+  <rect x="82" y="558" width="376" height="118" rx="16" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="106" y="592" class="card-title">로컬 인증·설정</text>
+  <text x="106" y="623" class="body">운영자 계정: PBKDF2 해시</text>
+  <text x="106" y="651" class="body">제어 토큰: Android Keystore 암호화</text>
+
+  <rect x="82" y="697" width="376" height="118" rx="16" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="106" y="731" class="card-title">영상·Follow 추론</text>
+  <text x="106" y="762" class="body">MJPEG 프레임 표시</text>
+  <text x="106" y="790" class="body">TFLite 사람 추적 및 제어 명령 생성</text>
+
+  <rect x="82" y="838" width="376" height="52" rx="13" fill="#DCFCE7"/>
+  <text x="270" y="870" text-anchor="middle" font-size="15" font-weight="750" fill="#166534">앱은 ROS 2에 직접 접속하지 않음</text>
+
+  <!-- SERVER -->
+  <g filter="url(#shadow)">
+    <rect x="685" y="145" width="500" height="890" rx="25" fill="white" stroke="#8DB4F8" stroke-width="2"/>
+    <path d="M710 145 H1160 Q1185 145 1185 170 V245 H685 V170 Q685 145 710 145 Z" fill="url(#serverHead)"/>
+  </g>
+  <text x="720" y="191" class="panel-title">② Ubuntu 서버</text>
+  <text x="720" y="222" class="panel-sub">Docker · Gateway + Map Processing</text>
+
+  <rect x="718" y="278" width="434" height="145" rx="16" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.5"/>
+  <text x="743" y="312" class="card-title" fill="#1D4ED8">robot-v2-gateway</text>
+  <text x="743" y="343" class="body">제어 토큰 검증 · 명령/상태 중계</text>
+  <text x="743" y="371" class="body">MAC / mDNS 기반 로봇 IP 자동 탐색</text>
+  <text x="743" y="399" class="body">끊김 감지 · 자동 재연결 · heartbeat</text>
+
+  <rect x="718" y="450" width="205" height="120" rx="15" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="741" y="482" class="card-title">운영 기록</text>
+  <text x="741" y="513" class="body">Operations Store</text>
+  <text x="741" y="541" class="body">SQLite3</text>
+
+  <rect x="947" y="450" width="205" height="120" rx="15" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="970" y="482" class="card-title">지도 수신함</text>
+  <text x="970" y="513" class="body">완료 PGM/YAML</text>
+  <text x="970" y="541" class="body">체크섬·원본 보존</text>
+
+  <path d="M1048 570 V610" fill="none" stroke="#7C3AED" stroke-width="3" marker-end="url(#arrowPurple)"/>
+
+  <rect x="718" y="625" width="434" height="160" rx="16" fill="#F5F3FF" stroke="#C4B5FD" stroke-width="1.5"/>
+  <text x="743" y="660" class="card-title" fill="#6D28D9">map-postprocessor</text>
+  <text x="743" y="692" class="body">노이즈 제거 · 벽 각도 보정</text>
+  <text x="743" y="720" class="body">짧은 벽 끊김 연결 · 품질 검증</text>
+  <text x="743" y="748" class="body">지도·로봇 자세에 동일 Affine 변환</text>
+
+  <path d="M935 785 V825" fill="none" stroke="#7C3AED" stroke-width="3" marker-end="url(#arrowPurple)"/>
+
+  <rect x="718" y="840" width="434" height="125" rx="16" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="743" y="874" class="card-title">지도 저장·버전 관리</text>
+  <text x="743" y="905" class="body">raw / corrected / current 버전 분리</text>
+  <text x="743" y="933" class="body">검증된 지도만 원자적으로 승격·반환</text>
+
+  <rect x="718" y="984" width="434" height="30" rx="10" fill="#DBEAFE"/>
+  <text x="935" y="1005" text-anchor="middle" class="small" fill="#1D4ED8">후처리 컨테이너는 외부 네트워크 차단</text>
+
+  <!-- ROBOT -->
+  <g filter="url(#shadow)">
+    <rect x="1315" y="145" width="430" height="990" rx="25" fill="white" stroke="#FDBA74" stroke-width="2"/>
+    <path d="M1340 145 H1720 Q1745 145 1745 170 V245 H1315 V170 Q1315 145 1340 145 Z" fill="url(#robotHead)"/>
+  </g>
+  <text x="1348" y="191" class="panel-title">③ 실물 로봇</text>
+  <text x="1348" y="222" class="panel-sub">Raspberry Pi 5 · ROS 2 Humble</text>
+
+  <rect x="1343" y="278" width="374" height="113" rx="16" fill="#FFF7ED" stroke="#FDBA74"/>
+  <text x="1367" y="311" class="card-title" fill="#C2410C">Command Bridge</text>
+  <text x="1367" y="342" class="body">최종 속도 제한 · 명령 임대</text>
+  <text x="1367" y="370" class="body">LiDAR/카메라 안전 검사 · 비상정지</text>
+
+  <rect x="1343" y="410" width="374" height="142" rx="16" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="1367" y="444" class="card-title">자율주행·매핑</text>
+  <text x="1367" y="475" class="body">SLAM Toolbox · Nav2</text>
+  <text x="1367" y="503" class="body">Frontier 탐색 · 정체 복구</text>
+  <text x="1367" y="531" class="body">지도 저장 PGM/YAML</text>
+
+  <rect x="1343" y="572" width="374" height="113" rx="16" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="1367" y="605" class="card-title">카메라·사람 추적</text>
+  <text x="1367" y="636" class="body">MJPEG Camera Server</text>
+  <text x="1367" y="664" class="body">YOLO Person Detect · Follow Me</text>
+
+  <rect x="1343" y="705" width="374" height="80" rx="15" fill="#FFF7ED" stroke="#FDBA74"/>
+  <text x="1530" y="738" text-anchor="middle" class="card-title" fill="#C2410C">로드셀 가드 (적재량 감지)</text>
+  <text x="1530" y="763" text-anchor="middle" class="small">HX711 · Pi5 GPIO 직결 (ESP32 미경유) · 이상/이하 임계값</text>
+
+  <rect x="1343" y="805" width="374" height="74" rx="15" fill="#FFF7ED" stroke="#FDBA74"/>
+  <text x="1530" y="838" text-anchor="middle" class="card-title">ROS 2 DDS Bus · Domain 20</text>
+  <text x="1530" y="863" text-anchor="middle" class="small">/scan · /odom · /tf · /cmd_vel · /loadcell · services/actions</text>
+
+  <path d="M1530 879 V918" fill="none" stroke="#EA580C" stroke-width="3" marker-end="url(#arrowOrange)"/>
+
+  <rect x="1343" y="932" width="374" height="74" rx="15" fill="#FFF7ED" stroke="#FDBA74"/>
+  <text x="1530" y="964" text-anchor="middle" class="card-title">micro-ROS Agent + Base Node</text>
+  <text x="1530" y="990" text-anchor="middle" class="small">USB Serial 921600 bps</text>
+
+  <path d="M1530 1006 V1043" fill="none" stroke="#EA580C" stroke-width="3" marker-end="url(#arrowOrange)"/>
+
+  <rect x="1343" y="1057" width="374" height="57" rx="15" fill="#FFEDD5"/>
+  <text x="1530" y="1081" text-anchor="middle" font-size="17" font-weight="800" fill="#9A3412">ESP32 + Hardware</text>
+  <text x="1530" y="1103" text-anchor="middle" class="small">LiDAR · IMU · Encoder · Motor · Servo · Camera</text>
+
+  <!-- APP <-> SERVER -->
+  <path d="M485 355 H662" fill="none" stroke="#2563EB" stroke-width="4" marker-end="url(#arrowBlue)"/>
+  <path d="M685 402 H508" fill="none" stroke="#2563EB" stroke-width="4" marker-end="url(#arrowBlue)"/>
+  <rect x="492" y="278" width="185" height="62" rx="13" fill="#EFF6FF" stroke="#BFDBFE"/>
+  <text x="584" y="302" text-anchor="middle" class="arrow-label" fill="#1D4ED8">TCP 9999 · JSON Lines</text>
+  <text x="584" y="325" text-anchor="middle" class="small">제어 토큰 · 명령 ↔ 상태/지도</text>
+
+  <!-- SERVER <-> ROBOT -->
+  <path d="M1185 355 H1292" fill="none" stroke="#2563EB" stroke-width="4" marker-end="url(#arrowBlue)"/>
+  <path d="M1315 405 H1208" fill="none" stroke="#2563EB" stroke-width="4" marker-end="url(#arrowBlue)"/>
+  <rect x="1195" y="278" width="110" height="62" rx="13" fill="#EFF6FF" stroke="#BFDBFE"/>
+  <text x="1250" y="302" text-anchor="middle" class="arrow-label" fill="#1D4ED8">TCP 9999</text>
+  <text x="1250" y="325" text-anchor="middle" class="small">명령 ↔ 상태</text>
+
+  <path d="M1315 580 H1208" fill="none" stroke="#7C3AED" stroke-width="4" marker-end="url(#arrowPurple)"/>
+  <path d="M1185 620 H1292" fill="none" stroke="#7C3AED" stroke-width="4" marker-end="url(#arrowPurple)"/>
+  <rect x="1191" y="491" width="118" height="72" rx="13" fill="#F5F3FF" stroke="#DDD6FE"/>
+  <text x="1250" y="516" text-anchor="middle" class="arrow-label" fill="#6D28D9">지도 전송</text>
+  <text x="1250" y="539" text-anchor="middle" class="small">PGM/YAML + pose</text>
+  <text x="1250" y="559" text-anchor="middle" class="small">보정본 반환</text>
+
+  <!-- ROBOT -> APP VIDEO -->
+  <path d="M1530 1135 V1180 H270 V920" fill="none" stroke="#16A34A" stroke-width="4" marker-end="url(#arrowGreen)"/>
+  <rect x="684" y="1152" width="432" height="62" rx="15" fill="#F0FDF4" stroke="#86EFAC"/>
+  <text x="900" y="1178" text-anchor="middle" class="arrow-label" fill="#15803D">로봇 → 앱 직접 영상</text>
+  <text x="900" y="1202" text-anchor="middle" class="small">HTTP MJPEG :8080 · /stream.mjpg</text>
+
+  <!-- Key safety notes -->
+  <rect x="55" y="955" width="430" height="79" rx="16" fill="#FFF7ED" stroke="#FED7AA"/>
+  <text x="78" y="984" font-size="16" font-weight="800" fill="#9A3412">Fail-safe</text>
+  <text x="78" y="1010" class="small">서버/앱 연결이 끊기면 로봇에서 명령 만료 후 정지</text>
+</svg>

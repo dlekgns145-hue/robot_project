@@ -8,6 +8,7 @@ COPY fastdds_profile.xml /opt/robot-control/fastdds_profile.xml
 COPY navigation_runtime_launch.py mapping_runtime_launch.py navigation_probe.py navigation_run_test.py \
     publish_initial_pose.py prepare_navigation_params.py scan_diagnostics.py odom_relay.py scan_time_fix.py \
     cmd_vel_relay.py autonomous_mapping.py map_service_relay.py frontier_core.py mapping_core.py map_bundle.py camera_obstacle_guard.py \
+    loadcell_guard.py \
     /opt/robot-control/navigation/
 COPY recovered/Broom.yaml recovered/Broom.pgm recovered/dwb_nav_params_fixed.yaml \
     mapping_slam_params.yaml \
@@ -24,20 +25,21 @@ RUN chmod 0755 /opt/robot-control/entrypoint.sh \
 
 RUN mkdir -p /opt/robot-control/maps
 
-# follow-me(YOLO 사람 인식 + 추적)에 필요한 패키지. cv_bridge는 ROS 배포판에 맞춰 apt로,
-# 나머지는 pip로 설치 -- opencv는 headless로 깔아서 컨테이너에 디스플레이가 없어도
-# import가 깨지지 않게 함 (detect.py의 show_debug_window는 배포 시 false로 실행).
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ros-humble-cv-bridge \
-    && apt-get clean \
-    && pip3 install --no-cache-dir ultralytics opencv-python-headless
-
 # The image's baked-in ROS apt signing key expires periodically; refresh it
-# before installing anything new or apt-get update fails with EXPKEYSIG.
+# before installing anything new or apt-get update fails with EXPKEYSIG (and,
+# worse, silently falls back to a stale cached package index whose URLs 404).
+# follow-me(YOLO 사람 인식 + 추적)에 필요한 cv_bridge도 여기서 같이 설치 -- 반드시
+# 키 갱신 다음에 와야 함, 순서가 바뀌면 오래된 인덱스를 참조해서 404가 남.
+# gpiozero+lgpio: loadcell_guard.py의 HX711 GPIO 비트뱅잉용. Pi5의 RP1 GPIO
+# 칩은 옛날 RPi.GPIO 패키지를 지원 안 해서 이 조합이 필요함.
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key | apt-key add - \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ros-humble-rmw-cyclonedds-cpp \
-    && apt-get clean
+    && apt-get install -y --no-install-recommends ros-humble-rmw-cyclonedds-cpp ros-humble-cv-bridge \
+    && apt-get clean \
+    && pip3 install --no-cache-dir "numpy<2" \
+    && pip3 install --no-cache-dir torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cpu \
+    && pip3 install --no-cache-dir "numpy<2" ultralytics opencv-python-headless "lap>=0.5.12" \
+    && pip3 install --no-cache-dir gpiozero lgpio
 
 # Nav2's stock launch files remap absolute /tf back to the relative name tf on
 # every node.  That node-local rule overrides the mapping/navigation launch

@@ -17,9 +17,9 @@ Nav2 액션 서버(`/navigate_to_pose`)를 통해 로봇을 자율적으로 이�
 
 [주요 조정 매개변수 (Parameters)]
 - decision_period: 매핑 판단 루프 주기 (기본 1.0초)
-- minimum_frontier_length: 유효한 경계선 최소 길이 (기본 0.35m)
+- minimum_frontier_length: 유효한 경계선 최소 길이 (기본 0.20m)
 - maximum_goal_distance: 한 번에 이동할 탐색 목표 최대 거리 (기본 7.0m)
-- frontier_goal_standoff: 경계선과 목표 지점 사이의 안전 이격 거리 (기본 0.35m)
+- frontier_goal_standoff: 경계선과 목표 지점 사이의 안전 이격 거리 (기본 0.25m)
 - minimum_save_known_area_m2: 지도 저장을 허용할 최소 관측 면적 (기본 1.0m²)
 """
 
@@ -35,7 +35,7 @@ from pathlib import Path
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
-from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from nav2_msgs.action import BackUp, ComputePathToPose, NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap, SaveMap
 from nav_msgs.msg import OccupancyGrid
 from nav_msgs.srv import GetMap
@@ -52,6 +52,8 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from frontier_core import (
     GridSpec,
     frontier_candidates,
+    frontier_distance_weight,
+    frontier_goal_step_distance,
     reachable_free_cell_indices,
 )
 from mapping_core import (
@@ -85,17 +87,32 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("base_frame", "base_footprint")
         self.declare_parameter("decision_period", 1.0)
         self.declare_parameter("startup_delay", 8.0)
-        # Allow Nav2's progress checker and recovery tree to finish a bounded
-        # spin/backup cycle before the frontier goal is cancelled.
+        # Hard cap for one frontier goal. The shorter progress watchdog below
+        # cancels a stall and starts our explicit backup/turn sequence.
         self.declare_parameter("goal_timeout", 120.0)
         # Classroom objects that can move normally do so within about ten
         # seconds. A stall triggers bounded recovery and another approach; it
         # does not by itself prove that the entire gray boundary is blocked.
+        # Lowered from 15.0: safety_block_timeout below already reacts in 3 s
+        # to a hard block, so this mainly needs to catch slow-but-not-zero
+        # progress -- 10 s still gives real (non-blocked) motion room to work.
         self.declare_parameter("goal_progress_timeout", 10.0)
         self.declare_parameter("goal_progress_minimum_delta", 0.10)
+        # The robot-side bridge knows when a fresh Nav2 translation is being
+        # held at zero by a real camera/LiDAR safety gate.  React to that
+        # explicit signal sooner than the generic progress watchdog.
+        self.declare_parameter("safety_block_timeout", 3.0)
+        self.declare_parameter("maximum_safety_status_age", 1.5)
         self.declare_parameter("goal_cancel_timeout", 8.0)
         self.declare_parameter("goal_retry_delay", 1.0)
         self.declare_parameter("frontier_plan_timeout", 8.0)
+        # A stalled classroom route needs a physical escape, not just a
+        # costmap clear. Nav2's recovery behaviors retain collision checking
+        # while backing up and turning, unlike publishing raw Twist commands.
+        self.declare_parameter("escape_backup_distance", 0.10)
+        self.declare_parameter("escape_backup_speed", 0.06)
+        self.declare_parameter("escape_turn_angle", 0.35)
+        self.declare_parameter("escape_action_timeout", 6.0)
         # Battery and maximum_runtime bound the run. Dense chair legs can
         # legitimately produce many isolated navigation failures, so do not
         # abort the entire exploration based on a global failure count.
@@ -109,32 +126,80 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("minimum_completion_travel_distance", 5.0)
         self.declare_parameter("maximum_runtime", 1800.0)
         self.declare_parameter("completion_stable_maps", 5)
-        self.declare_parameter("minimum_frontier_length", 0.35)
+        self.declare_parameter("minimum_frontier_length", 0.20)
         self.declare_parameter("minimum_completion_frontier_length", 0.10)
         self.declare_parameter("minimum_completion_goal_distance", 0.20)
-        self.declare_parameter("minimum_goal_distance", 0.45)
+        self.declare_parameter("minimum_goal_distance", 0.35)
         self.declare_parameter("maximum_goal_distance", 7.0)
         # Short 0.35 m stages left only about 0.15 m outside Nav2's goal
         # tolerance. On the physical base that was too little commanded travel
         # to overcome startup friction reliably, so the same nearby corridor
         # failed five times without exposing meaningful new scan area.
-        self.declare_parameter("maximum_goal_step_distance", 0.75)
-        self.declare_parameter("frontier_goal_standoff", 0.35)
-        self.declare_parameter("minimum_goal_obstacle_clearance", 0.28)
-        # Explore main classroom aisles first. If no frontier can be reached
-        # with this clearance, fall back to the normal 0.28 m safe path so the
-        # remaining narrow aisles are mapped last instead of skipped.
-        self.declare_parameter("preferred_path_obstacle_clearance", 0.40)
+        self.declare_parameter("maximum_goal_step_distance", 1.00)
+        # A full 1.0 m staged goal asks Nav2's global planner for one
+        # continuous valid path through the clutter around it. That plan can
+        # keep failing near chair/desk legs even where the space is
+        # genuinely passable -- confirmed by manually driving through with
+        # much shorter, frequently re-checked nudges after 30+ scored
+        # attempts failed here. Once stuck_failure_threshold is hit, ask for
+        # the same short, easy segment instead of continuing to fail long.
+        self.declare_parameter("stuck_goal_step_distance", 0.35)
+        self.declare_parameter("frontier_goal_standoff", 0.25)
+        # The classroom has measured 0.50 m desk aisles. With a 0.22 m robot
+        # radius only about 0.03 m remains on each side, so keep every planned
+        # center cell at least 0.23 m from occupied map cells. Do not reduce the
+        # configured robot radius to manufacture clearance that does not exist.
+        self.declare_parameter("minimum_goal_obstacle_clearance", 0.23)
+        self.declare_parameter("preferred_path_obstacle_clearance", 0.24)
+        # Scoring normally favours the nearest frontier (distance_weight in
+        # frontier_core.frontier_candidates, default 0.45), which keeps
+        # re-trying approaches clustered around wherever the robot already
+        # is. After repeated failures there, relax that bias so a farther
+        # frontier reached through already-mapped, previously-clear space
+        # can out-score one more nearby approach to the same tight spot.
+        self.declare_parameter("frontier_distance_weight", 0.45)
+        self.declare_parameter("stuck_failure_threshold", 6)
+        self.declare_parameter("stuck_frontier_distance_weight", 0.15)
+        # frontier_length alone favours a long boundary regardless of what is
+        # behind it, which can keep sending the robot back along the edge of
+        # an already-mapped sector instead of into a genuinely unmapped one.
+        # Score in each candidate's reachable unknown area too, always on
+        # (not just once stuck), so a frontier opening onto a big unexplored
+        # sector wins over one fronting a small already-covered pocket.
+        #
+        # The distance penalty above is charged against the real path length
+        # to the frontier (frontier_core.frontier_candidates' target_distance),
+        # not the short staged hop actually sent to Nav2 -- so a genuinely far
+        # but big unmapped sector still needs a large bonus to survive that
+        # penalty. At the old 0.15/1500 setting the maximum possible bonus was
+        # only ~1.27 (0.15 * 1500 cells * 0.075^2 m^2/cell), which a mere ~3 m
+        # of extra path distance (0.45/m) already cancels out -- so any
+        # unmapped area more than a few metres past a doorway always lost to
+        # whatever small frontier was already visible nearby (2026-08-18: the
+        # robot circled the already-mapped near sector and never crossed into
+        # a visibly open, still-unmapped area further away). Raised so the
+        # capped bonus (0.6 * 3000 * 0.075^2 = ~10.1) comfortably outweighs
+        # normal in-room distance differences and reliably pulls the robot
+        # through already-mapped space toward the largest unmapped sector.
+        self.declare_parameter("unknown_region_gain_weight", 0.6)
+        self.declare_parameter("unknown_region_cap", 3000)
         self.declare_parameter("maximum_robot_free_seed_distance", 0.50)
         self.declare_parameter("maximum_exploration_radius", 25.0)
-        self.declare_parameter("blacklist_radius", 0.7)
-        self.declare_parameter("staged_goal_blacklist_radius", 0.35)
-        # One stalled approach gets a short local cooldown so the same cluster
-        # can offer a different entry point. Only repeated failures suppress
-        # the whole frontier, and even that suppression is short: failed gray
-        # boundaries remain completion blockers and must be retried.
-        self.declare_parameter("stalled_goal_stage_blacklist_seconds", 8.0)
+        self.declare_parameter("blacklist_radius", 0.45)
+        self.declare_parameter("staged_goal_blacklist_radius", 0.20)
+        # A backup + spin recovery can take more than ten seconds.  The old
+        # eight-second stage cooldown expired before selection resumed, so the
+        # mapper immediately chose effectively the same blocked approach.
+        # Keep that approach out long enough to try another aisle/frontier.
+        # 60.0 was more margin than the ~12-14 s worst-case escape sequence
+        # (backup up to escape_action_timeout=6.0 s + spin up to another 6.0 s
+        # + response overhead) actually needs; 20 s still clears that with
+        # room to spare while cutting idle waiting between attempts.
+        self.declare_parameter("stalled_goal_stage_blacklist_seconds", 20.0)
         self.declare_parameter("frontier_failures_before_cooldown", 3)
+        # Only reached after frontier_failures_before_cooldown real attempts
+        # already failed. Lowered from 45.0 for the same reason as the stage
+        # cooldown above -- still well past one escape sequence.
         self.declare_parameter("failed_goal_blacklist_seconds", 20.0)
         # Reaching a gray boundary means that region has already received an
         # exploration attempt. Keep it out of the destination set for the rest
@@ -146,7 +211,10 @@ class AutonomousMappingNode(Node):
         self.declare_parameter("map_output", "/opt/robot-control/maps/orchard_map")
         self.declare_parameter("minimum_battery_percent", 25)
         self.declare_parameter("maximum_battery_age", 10.0)
-        self.declare_parameter("resume_pose_graph", True)
+        # The server is the durable map store.  The Pi keeps only the raw map
+        # long enough for transfer and must not accumulate SLAM resume backups.
+        self.declare_parameter("resume_pose_graph", False)
+        self.declare_parameter("persist_pose_graph", False)
 
         self.map_frame = str(self.get_parameter("map_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
@@ -178,6 +246,8 @@ class AutonomousMappingNode(Node):
         self.path_planner = ActionClient(
             self, ComputePathToPose, "/compute_path_to_pose"
         )
+        self.backup_recovery = ActionClient(self, BackUp, "/backup")
+        self.spin_recovery = ActionClient(self, Spin, "/spin")
         self.global_costmap_clearer = self.create_client(
             ClearEntireCostmap,
             "/global_costmap/clear_entirely_global_costmap",
@@ -197,6 +267,9 @@ class AutonomousMappingNode(Node):
         self.pose_graph_loader = self.create_client(
             DeserializePoseGraph, "/slam_toolbox/deserialize_map"
         )
+        self.person_detection_pause = self.create_client(
+            Trigger, "/person_detection/pause"
+        )
         self.navigation_lease_publisher = self.create_publisher(
             Bool, "/cmd_bridge/navigation_lease", 10
         )
@@ -204,6 +277,12 @@ class AutonomousMappingNode(Node):
             Bool,
             "/cmd_bridge/emergency_stop",
             self._on_emergency_stop,
+            10,
+        )
+        self.safety_status_subscription = self.create_subscription(
+            String,
+            "/cmd_bridge/safety_status",
+            self._on_safety_status,
             10,
         )
         self.battery_subscription = self.create_subscription(
@@ -233,6 +312,9 @@ class AutonomousMappingNode(Node):
         self.map_request_future = None
         self.latest_battery_percent: int | None = None
         self.last_battery_received_at = 0.0
+        self.latest_safety_status: dict = {}
+        self.last_safety_status_at = 0.0
+        self.safety_blocked_since = 0.0
         self.map_sequence = 0
         self.last_empty_map_sequence = -1
         self.empty_map_count = 0
@@ -261,6 +343,13 @@ class AutonomousMappingNode(Node):
         self.next_goal_not_before = 0.0
         self.consecutive_goal_failures = 0
         self.distance_remaining = None
+        self.escape_stage = "idle"
+        self.escape_generation = 0
+        self.escape_handle = None
+        self.escape_started_at = 0.0
+        self.escape_message = ""
+        self.escape_recovery_summary = ""
+        self.escape_turn_sign = 1.0
         self.blacklist: list[tuple[float, float, float, bool]] = []
         self.staged_blacklist: list[tuple[float, float, float]] = []
         self.frontier_failure_records: list[FrontierFailureRecord] = []
@@ -312,6 +401,80 @@ class AutonomousMappingNode(Node):
     def _on_battery(self, message: UInt16) -> None:
         self.latest_battery_percent = max(0, min(100, int(message.data)))
         self.last_battery_received_at = self._seconds()
+
+    def _on_safety_status(self, message: String) -> None:
+        """Track an explicit robot-side motor safety hold."""
+
+        try:
+            status = json.loads(message.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(status, dict):
+            return
+        now = self._seconds()
+        reason = str(status.get("reason", ""))
+        try:
+            requested_linear = abs(float(status.get("requested_linear", 0.0)))
+            output_linear = abs(float(status.get("output_linear", 0.0)))
+        except (TypeError, ValueError):
+            requested_linear = 0.0
+            output_linear = 0.0
+        blocked = (
+            bool(status.get("navigation_mode", False))
+            and reason
+            in {
+                "camera_critical",
+                "camera_front",
+                "lidar_front",
+                "lidar_rear",
+                "lidar_stale",
+            }
+            and requested_linear > 0.01
+            and output_linear <= 0.001
+        )
+        previous_reason = str(self.latest_safety_status.get("reason", ""))
+        self.latest_safety_status = status
+        self.last_safety_status_at = now
+        if blocked:
+            if self.safety_blocked_since <= 0.0 or reason != previous_reason:
+                self.safety_blocked_since = now
+        else:
+            self.safety_blocked_since = 0.0
+
+    def _active_safety_block(self, now: float) -> tuple[str, float] | None:
+        maximum_age = float(
+            self.get_parameter("maximum_safety_status_age").value
+        )
+        if (
+            self.safety_blocked_since <= 0.0
+            or self.last_safety_status_at <= 0.0
+            or now - self.last_safety_status_at > maximum_age
+        ):
+            return None
+        reason = str(self.latest_safety_status.get("reason", "safety_gate"))
+        return reason, max(0.0, now - self.safety_blocked_since)
+
+    def _safety_block_message(self, reason: str, duration: float) -> str:
+        labels = {
+            "camera_critical": "critical camera obstacle",
+            "camera_front": "camera obstacle",
+            "lidar_front": "front LiDAR obstacle",
+            "lidar_rear": "rear LiDAR obstacle",
+            "lidar_stale": "stale LiDAR data",
+        }
+        distance_key = (
+            "camera_hard_stop_m"
+            if reason.startswith("camera_")
+            else "lidar_rear_m" if reason == "lidar_rear" else "lidar_front_m"
+        )
+        distance = self.latest_safety_status.get(distance_key)
+        suffix = ""
+        if isinstance(distance, (int, float)) and math.isfinite(float(distance)):
+            suffix = f" at {float(distance):.2f} m"
+        return (
+            f"frontier motion blocked by {labels.get(reason, reason)}{suffix} "
+            f"for {duration:.1f} s"
+        )
 
     def _pose_graph_base(self) -> Path:
         return Path(f"{self.get_parameter('map_output').value}_slam")
@@ -561,6 +724,10 @@ class AutonomousMappingNode(Node):
             errors.append("Nav2 action server is not ready")
         if not self.path_planner.server_is_ready():
             errors.append("Nav2 path planner is not ready")
+        if not self.backup_recovery.server_is_ready():
+            errors.append("Nav2 backup recovery is not ready")
+        if not self.spin_recovery.server_is_ready():
+            errors.append("Nav2 spin recovery is not ready")
         if not self.map_saver.service_is_ready():
             errors.append("map saver service is not ready")
         return errors
@@ -619,6 +786,7 @@ class AutonomousMappingNode(Node):
             self.state = "not_ready"
             self._publish_status(response.message)
             return response
+        self._pause_person_detection()
         self._set_navigation_mode(True)
         self.enabled = True
         self.state = "starting"
@@ -642,6 +810,18 @@ class AutonomousMappingNode(Node):
         self.plan_generation += 1
         self.next_goal_not_before = 0.0
         self.consecutive_goal_failures = 0
+        # A stale nonzero value here (left over from a prior session that
+        # ended via the natural-completion path, which does not go through
+        # _stop_exploration) would make the very first safety-status update
+        # of this new session look like it has already been blocked for a
+        # long time, triggering an immediate goal cancel.
+        self.safety_blocked_since = 0.0
+        self.escape_generation += 1
+        self.escape_stage = "idle"
+        self.escape_handle = None
+        self.escape_started_at = 0.0
+        self.escape_message = ""
+        self.escape_recovery_summary = ""
         self.travel_distance = 0.0
         self.last_travel_pose = self.start_pose
         self.saved_map = ""
@@ -714,6 +894,20 @@ class AutonomousMappingNode(Node):
         for _ in range(3 if not enabled else 1):
             self.navigation_lease_publisher.publish(lease)
 
+    def _pause_person_detection(self) -> None:
+        """Pause CPU-heavy perception while SLAM and Nav2 own the robot."""
+
+        if not self.person_detection_pause.service_is_ready():
+            self.get_logger().warn(
+                "person detection pause service is unavailable; "
+                "mapping should run without the person-detect container"
+            )
+            return
+        try:
+            self.person_detection_pause.call_async(Trigger.Request())
+        except Exception as error:
+            self.get_logger().warn(f"could not pause person detection: {error}")
+
     def _record_travel(self, x: float, y: float) -> None:
         if self.last_travel_pose is not None:
             step = math.hypot(x - self.last_travel_pose[0], y - self.last_travel_pose[1])
@@ -728,6 +922,7 @@ class AutonomousMappingNode(Node):
     def _stop_exploration(self, reason: str) -> None:
         self.enabled = False
         self.state = "stopped"
+        self.safety_blocked_since = 0.0
         self.goal_generation += 1
         if self.goal_handle is not None and not self.goal_cancel_pending:
             self.goal_handle.cancel_goal_async()
@@ -738,6 +933,17 @@ class AutonomousMappingNode(Node):
         self.goal_cancel_reason = ""
         self.goal_progress = None
         self.goal_candidate = None
+        self.escape_generation += 1
+        if self.escape_handle is not None:
+            try:
+                self.escape_handle.cancel_goal_async()
+            except Exception:
+                pass
+        self.escape_stage = "idle"
+        self.escape_handle = None
+        self.escape_started_at = 0.0
+        self.escape_message = ""
+        self.escape_recovery_summary = ""
         self.plan_generation += 1
         if self.plan_handle is not None:
             try:
@@ -858,8 +1064,178 @@ class AutonomousMappingNode(Node):
                     True,
                 )
             )
-        self._request_costmap_recovery()
         return record.attempts, len(record.approaches), whole_frontier_cooldown
+
+    @staticmethod
+    def _format_recovery_summary(recovery) -> str:
+        if recovery is None:
+            return ""
+        attempts, approaches, whole_frontier_cooldown = recovery
+        summary = f"recovery attempt {attempts} from {approaches} approach(es)"
+        if whole_frontier_cooldown:
+            summary += "; short frontier cooldown"
+        return summary
+
+    def _begin_escape_recovery(self, message: str, recovery) -> bool:
+        """Back away and turn before selecting a different frontier approach."""
+
+        if not (
+            self.backup_recovery.server_is_ready()
+            and self.spin_recovery.server_is_ready()
+        ):
+            return False
+        self.escape_generation += 1
+        generation = self.escape_generation
+        self.escape_handle = None
+        self.escape_started_at = self._seconds()
+        self.escape_message = message
+        self.escape_recovery_summary = self._format_recovery_summary(recovery)
+
+        # camera_critical blocks translation in either direction, not just
+        # the one Nav2 was attempting -- a backup attempt would sit at the
+        # bridge's zero output for the full escape_action_timeout before
+        # failing, wasting a cycle we already know is doomed. Skip straight
+        # to the turn, which camera_critical does not restrict.
+        if self.latest_safety_status.get("reason") == "camera_critical":
+            self._send_escape_spin(generation, backup_succeeded=False)
+            return True
+
+        self.escape_stage = "backing_up"
+        goal = BackUp.Goal()
+        goal.target.x = -abs(
+            float(self.get_parameter("escape_backup_distance").value)
+        )
+        goal.speed = abs(float(self.get_parameter("escape_backup_speed").value))
+        goal.time_allowance = Duration(
+            seconds=float(self.get_parameter("escape_action_timeout").value)
+        ).to_msg()
+        self.state = "escape_backing_up"
+        self._publish_status(
+            f"{message}; backing up before trying another approach"
+        )
+        try:
+            future = self.backup_recovery.send_goal_async(goal)
+        except Exception as error:
+            self.get_logger().warn(f"backup recovery could not start: {error}")
+            self._send_escape_spin(generation, backup_succeeded=False)
+            return True
+        future.add_done_callback(
+            lambda completed, escape_generation=generation: (
+                self._on_escape_backup_response(completed, escape_generation)
+            )
+        )
+        return True
+
+    def _on_escape_backup_response(self, future, generation: int) -> None:
+        if generation != self.escape_generation or not self.enabled:
+            return
+        try:
+            handle = future.result()
+        except Exception as error:
+            self.get_logger().warn(f"backup recovery request failed: {error}")
+            self._send_escape_spin(generation, backup_succeeded=False)
+            return
+        if not handle.accepted:
+            self.get_logger().warn("backup recovery was rejected")
+            self._send_escape_spin(generation, backup_succeeded=False)
+            return
+        self.escape_handle = handle
+        handle.get_result_async().add_done_callback(
+            lambda completed, escape_generation=generation: (
+                self._on_escape_backup_result(completed, escape_generation)
+            )
+        )
+
+    def _on_escape_backup_result(self, future, generation: int) -> None:
+        if generation != self.escape_generation or not self.enabled:
+            return
+        self.escape_handle = None
+        try:
+            succeeded = int(future.result().status) == GoalStatus.STATUS_SUCCEEDED
+        except Exception as error:
+            self.get_logger().warn(f"backup recovery result failed: {error}")
+            succeeded = False
+        self._send_escape_spin(generation, backup_succeeded=succeeded)
+
+    def _send_escape_spin(self, generation: int, *, backup_succeeded: bool) -> None:
+        if generation != self.escape_generation or not self.enabled:
+            return
+        goal = Spin.Goal()
+        goal.target_yaw = self.escape_turn_sign * abs(
+            float(self.get_parameter("escape_turn_angle").value)
+        )
+        self.escape_turn_sign *= -1.0
+        goal.time_allowance = Duration(
+            seconds=float(self.get_parameter("escape_action_timeout").value)
+        ).to_msg()
+        self.escape_stage = "turning"
+        self.escape_started_at = self._seconds()
+        self.state = "escape_turning"
+        backup_state = "backup complete" if backup_succeeded else "backup blocked"
+        self._publish_status(f"{backup_state}; turning to expose another route")
+        try:
+            future = self.spin_recovery.send_goal_async(goal)
+        except Exception as error:
+            self.get_logger().warn(f"spin recovery could not start: {error}")
+            self._complete_escape_recovery("turn could not start")
+            return
+        future.add_done_callback(
+            lambda completed, escape_generation=generation: (
+                self._on_escape_spin_response(completed, escape_generation)
+            )
+        )
+
+    def _on_escape_spin_response(self, future, generation: int) -> None:
+        if generation != self.escape_generation or not self.enabled:
+            return
+        try:
+            handle = future.result()
+        except Exception as error:
+            self.get_logger().warn(f"spin recovery request failed: {error}")
+            self._complete_escape_recovery("turn request failed")
+            return
+        if not handle.accepted:
+            self._complete_escape_recovery("turn was rejected")
+            return
+        self.escape_handle = handle
+        handle.get_result_async().add_done_callback(
+            lambda completed, escape_generation=generation: (
+                self._on_escape_spin_result(completed, escape_generation)
+            )
+        )
+
+    def _on_escape_spin_result(self, future, generation: int) -> None:
+        if generation != self.escape_generation or not self.enabled:
+            return
+        self.escape_handle = None
+        try:
+            succeeded = int(future.result().status) == GoalStatus.STATUS_SUCCEEDED
+        except Exception as error:
+            self.get_logger().warn(f"spin recovery result failed: {error}")
+            succeeded = False
+        self._complete_escape_recovery(
+            "escape maneuver complete" if succeeded else "turn was blocked"
+        )
+
+    def _complete_escape_recovery(self, result: str) -> None:
+        if not self.enabled:
+            return
+        message = self.escape_message or "frontier navigation failed"
+        summary = self.escape_recovery_summary
+        self.escape_stage = "idle"
+        self.escape_handle = None
+        self.escape_started_at = 0.0
+        self.escape_message = ""
+        self.escape_recovery_summary = ""
+        self._request_costmap_recovery()
+        self.next_goal_not_before = self._seconds() + float(
+            self.get_parameter("goal_retry_delay").value
+        )
+        self.state = "goal_retry_cooldown"
+        details = f"; {summary}" if summary else ""
+        self._publish_status(
+            f"{message}{details}; {result}; choosing another approach"
+        )
 
     def _clear_frontier_failure_record(self, candidate) -> None:
         radius = max(
@@ -932,6 +1308,31 @@ class AutonomousMappingNode(Node):
             active_staged_blacklist,
         ) = self._prune_blacklist(self._seconds())
 
+        distance_weight = frontier_distance_weight(
+            consecutive_goal_failures=self.consecutive_goal_failures,
+            stuck_failure_threshold=int(
+                self.get_parameter("stuck_failure_threshold").value
+            ),
+            normal_distance_weight=float(
+                self.get_parameter("frontier_distance_weight").value
+            ),
+            stuck_distance_weight=float(
+                self.get_parameter("stuck_frontier_distance_weight").value
+            ),
+        )
+        goal_step_distance = frontier_goal_step_distance(
+            consecutive_goal_failures=self.consecutive_goal_failures,
+            stuck_failure_threshold=int(
+                self.get_parameter("stuck_failure_threshold").value
+            ),
+            normal_step_distance=float(
+                self.get_parameter("maximum_goal_step_distance").value
+            ),
+            stuck_step_distance=float(
+                self.get_parameter("stuck_goal_step_distance").value
+            ),
+        )
+
         def search(
             *,
             min_cells: int,
@@ -958,12 +1359,17 @@ class AutonomousMappingNode(Node):
                 staged_blacklist_radius=float(
                     self.get_parameter("staged_goal_blacklist_radius").value
                 ),
+                distance_weight=distance_weight,
+                unknown_gain_weight=float(
+                    self.get_parameter("unknown_region_gain_weight").value
+                ),
+                unknown_region_cap=int(
+                    self.get_parameter("unknown_region_cap").value
+                ),
                 goal_standoff=float(
                     self.get_parameter("frontier_goal_standoff").value
                 ),
-                maximum_goal_step_distance=float(
-                    self.get_parameter("maximum_goal_step_distance").value
-                ),
+                maximum_goal_step_distance=goal_step_distance,
                 minimum_obstacle_clearance=float(
                     self.get_parameter("minimum_goal_obstacle_clearance").value
                 ),
@@ -1098,6 +1504,25 @@ class AutonomousMappingNode(Node):
         except TransformException:
             pass
 
+        if self.escape_stage != "idle":
+            action_timeout = float(
+                self.get_parameter("escape_action_timeout").value
+            )
+            if (
+                action_timeout > 0.0
+                and now - self.escape_started_at >= action_timeout + 2.0
+            ):
+                if self.escape_handle is not None:
+                    try:
+                        self.escape_handle.cancel_goal_async()
+                    except Exception:
+                        pass
+                self.escape_generation += 1
+                self._complete_escape_recovery(
+                    f"{self.escape_stage} timed out"
+                )
+            return
+
         if self.goal_handle is not None:
             if self.goal_cancel_pending:
                 cancel_timeout = float(
@@ -1114,6 +1539,20 @@ class AutonomousMappingNode(Node):
                     self._request_map_save(
                         "saving partial map after Nav2 cancellation timeout"
                     )
+                return
+
+            safety_timeout = float(
+                self.get_parameter("safety_block_timeout").value
+            )
+            safety_block = self._active_safety_block(now)
+            if (
+                safety_block is not None
+                and safety_timeout > 0.0
+                and safety_block[1] >= safety_timeout
+            ):
+                self._cancel_active_goal(
+                    self._safety_block_message(*safety_block)
+                )
                 return
 
             progress_timeout = float(
@@ -1241,6 +1680,7 @@ class AutonomousMappingNode(Node):
                     return
                 self.enabled = False
                 self.state = "completed"
+                self.safety_blocked_since = 0.0
                 self._publish_zero()
                 self._set_navigation_mode(False)
                 self._publish_status("exploration complete")
@@ -1359,6 +1799,7 @@ class AutonomousMappingNode(Node):
         recovery = None
         if candidate is not None:
             recovery = self._record_frontier_failure(candidate)
+            self._request_costmap_recovery()
         if not self.enabled:
             return
         self.next_goal_not_before = self._seconds() + min(
@@ -1482,7 +1923,9 @@ class AutonomousMappingNode(Node):
         self._blacklist_candidate(self.goal_candidate, failed)
         self.goal_candidate = None
 
-    def _finish_goal_failure(self, message: str) -> None:
+    def _finish_goal_failure(
+        self, message: str, *, physical_recovery: bool = False
+    ) -> None:
         """Recover from one bad approach without hiding remaining gray space."""
 
         candidate = self.goal_candidate
@@ -1511,18 +1954,15 @@ class AutonomousMappingNode(Node):
             self._stop_exploration(failure_message)
             self._request_map_save("saving partial map after navigation failures")
             return
+        if physical_recovery and self._begin_escape_recovery(message, recovery):
+            return
+        self._request_costmap_recovery()
         self.next_goal_not_before = self._seconds() + float(
             self.get_parameter("goal_retry_delay").value
         )
         self.state = "goal_failed"
-        recovery_message = ""
-        if recovery is not None:
-            attempts, approaches, whole_frontier_cooldown = recovery
-            recovery_message = (
-                f"; recovery attempt {attempts} from {approaches} approach(es)"
-            )
-            if whole_frontier_cooldown:
-                recovery_message += "; short frontier cooldown"
+        summary = self._format_recovery_summary(recovery)
+        recovery_message = f"; {summary}" if summary else ""
         limit = str(maximum_failures) if maximum_failures > 0 else "unlimited"
         self._publish_status(
             f"{message}{recovery_message}; consecutive failures "
@@ -1532,6 +1972,7 @@ class AutonomousMappingNode(Node):
     def _on_goal_result(self, future, generation: int) -> None:
         if generation != self.goal_generation:
             return
+        cancel_reason = self.goal_cancel_reason
         self.goal_handle = None
         self.goal_cancel_pending = False
         if not self.enabled:
@@ -1545,7 +1986,11 @@ class AutonomousMappingNode(Node):
             return
         succeeded = status == GoalStatus.STATUS_SUCCEEDED
         if not succeeded:
-            self._finish_goal_failure(f"frontier failed with status={status}")
+            failure_message = cancel_reason or f"frontier failed with status={status}"
+            self._finish_goal_failure(
+                failure_message,
+                physical_recovery=True,
+            )
             return
         if self.goal_candidate is not None:
             self._clear_frontier_failure_record(self.goal_candidate)
@@ -1646,9 +2091,14 @@ class AutonomousMappingNode(Node):
             self.saving_robot_pose,
         )
         self.save_sequence += 1
-        self.pose_graph_save_requested = True
-        self.pose_graph_saved = False
-        self._request_pose_graph_save()
+        if bool(self.get_parameter("persist_pose_graph").value):
+            self.pose_graph_save_requested = True
+            self.pose_graph_saved = False
+            self._request_pose_graph_save()
+        else:
+            self.pose_graph_save_requested = False
+            self.pose_graph_saved = False
+            self.pose_graph_resume_state = "disabled"
         self._publish_status(f"map saved and validated: {self.saving_map_output}")
 
     def _persist_saved_mapping_pose(self, map_output: str, pose):
@@ -1716,6 +2166,12 @@ class AutonomousMappingNode(Node):
             "consecutive_goal_failures": self.consecutive_goal_failures,
             "goal_cancel_pending": self.goal_cancel_pending,
             "path_check_pending": self.plan_request_pending,
+            "escape_recovery_stage": self.escape_stage,
+            "safety": (
+                dict(self.latest_safety_status)
+                if self.last_safety_status_at > 0.0
+                else None
+            ),
             "map_age_seconds": (
                 None
                 if self.last_map_received_at <= 0.0

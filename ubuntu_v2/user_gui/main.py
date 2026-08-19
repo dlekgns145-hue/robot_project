@@ -59,6 +59,8 @@ class UserMainWindow(QMainWindow):
         self.vision_mode: str | None = None
         self.gateway_connected = False
         self.robot_connected = False
+        self.robot_follow_active = False
+        self.mapping_active = False
         self.current_robot_ip = ""
         self._manual_keys: set[int] = set()
         self._last_robot_state: tuple[bool, str] | None = None
@@ -147,8 +149,22 @@ class UserMainWindow(QMainWindow):
         self.follow_button.setCheckable(True)
         self.follow_button.setMinimumHeight(48)
         self.follow_button.clicked.connect(self.toggle_follow)
+        # Distinct from follow_button: that one runs YOLO/pose inference
+        # locally on this machine and drives the robot from here. This one
+        # tells the robot to follow using its own onboard camera and best.pt
+        # model (robot_docker/follow/follow_person.py) -- nothing runs on
+        # this machine while it's active, this app just sends the two
+        # trigger commands. Untested on real hardware as of 2026-08-19 (see
+        # HANDOFF.md), so labeled accordingly rather than presented as an
+        # equally-proven alternative to follow_button.
+        self.robot_follow_button = QPushButton("로봇 자동 추적 시작 (베타)")
+        self.robot_follow_button.setProperty("role", "primary")
+        self.robot_follow_button.setCheckable(True)
+        self.robot_follow_button.setMinimumHeight(48)
+        self.robot_follow_button.clicked.connect(self.toggle_robot_follow)
         actions.addWidget(self.camera_button)
         actions.addWidget(self.follow_button)
+        actions.addWidget(self.robot_follow_button)
         left.addLayout(actions)
 
         right_scroll = QScrollArea()
@@ -233,17 +249,42 @@ class UserMainWindow(QMainWindow):
         drive.addWidget(keyboard_hint, 4, 0, 1, 3)
         side_layout.addWidget(drive_group)
 
+        mapping_group = QGroupBox("현장 지도 만들기")
+        mapping_layout = QVBoxLayout(mapping_group)
+        mapping_hint = QLabel(
+            "로봇이 스스로 이동하며 주변을 탐색해 지도를 만듭니다."
+        )
+        mapping_hint.setWordWrap(True)
+        mapping_hint.setObjectName("Hint")
+        mapping_layout.addWidget(mapping_hint)
+        self.mapping_status_label = QLabel("매핑 런타임 대기 중")
+        self.mapping_status_label.setObjectName("StatusValue")
+        mapping_layout.addWidget(self.mapping_status_label)
+        mapping_buttons = QGridLayout()
+        self.mapping_start_button = QPushButton("자동 매핑 시작")
+        self.mapping_start_button.setProperty("role", "primary")
+        self.mapping_start_button.clicked.connect(self.start_mapping)
+        self.mapping_stop_button = QPushButton("매핑 정지")
+        self.mapping_stop_button.clicked.connect(self.stop_mapping)
+        self.mapping_save_button = QPushButton("현재 지도 저장")
+        self.mapping_save_button.clicked.connect(self.save_mapping)
+        mapping_buttons.addWidget(self.mapping_start_button, 0, 0)
+        mapping_buttons.addWidget(self.mapping_stop_button, 0, 1)
+        mapping_buttons.addWidget(self.mapping_save_button, 1, 0, 1, 2)
+        mapping_layout.addLayout(mapping_buttons)
+        side_layout.addWidget(mapping_group)
+
         connection_group = QGroupBox("연결 설정 · 처음 한 번만")
         connection_form = QFormLayout(connection_group)
         connection_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
         self.host_edit = QLineEdit()
-        self.host_edit.setPlaceholderText("예: 192.168.64.15")
+        self.host_edit.setPlaceholderText("예: 192.168.64.16")
         self.command_port = QSpinBox()
         self.command_port.setRange(1, 65535)
         self.robot_host_edit = QLineEdit()
-        self.robot_host_edit.setPlaceholderText("raspberrypi.local")
+        self.robot_host_edit.setPlaceholderText("예: 172.30.1.10")
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("관리자에게 받은 토큰")
@@ -278,12 +319,12 @@ class UserMainWindow(QMainWindow):
         button.released.connect(self.stop_motion)
 
     def _load_settings(self) -> None:
-        self.host_edit.setText(str(self.settings_store.value("host", "")))
+        self.host_edit.setText(str(self.settings_store.value("host", "192.168.64.16")))
         self.command_port.setValue(
             int(self.settings_store.value("command_port", 9999))
         )
         self.robot_host_edit.setText(
-            str(self.settings_store.value("robot_host", "raspberrypi.local"))
+            str(self.settings_store.value("robot_host", "172.30.1.10"))
         )
         self.token_edit.setText(str(self.settings_store.value("token", "")))
         speed_index = int(self.settings_store.value("speed_index", 1))
@@ -329,6 +370,7 @@ class UserMainWindow(QMainWindow):
     def disconnect_robot(self) -> None:
         self._manual_keys.clear()
         self.stop_vision()
+        self.stop_robot_follow()
         client = self.client
         if client is not None:
             client.stop()
@@ -353,11 +395,16 @@ class UserMainWindow(QMainWindow):
         self.token_edit.setEnabled(enabled)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
+        drive_enabled = enabled and not self.mapping_active
         self.camera_button.setEnabled(enabled)
-        self.follow_button.setEnabled(enabled)
-        self.speed_combo.setEnabled(enabled)
+        self.follow_button.setEnabled(drive_enabled)
+        self.robot_follow_button.setEnabled(drive_enabled)
+        self.speed_combo.setEnabled(drive_enabled)
         for button in self.drive_buttons:
-            button.setEnabled(enabled)
+            button.setEnabled(drive_enabled)
+        self.mapping_start_button.setEnabled(enabled and not self.mapping_active)
+        self.mapping_stop_button.setEnabled(enabled and self.mapping_active)
+        self.mapping_save_button.setEnabled(enabled)
 
     def on_connection_changed(self, connected: bool, message: str) -> None:
         self.gateway_connected = connected
@@ -374,6 +421,9 @@ class UserMainWindow(QMainWindow):
         robot_ip = str(status.get("robot_ip") or "").strip()
         self.current_robot_ip = robot_ip if self.robot_connected else ""
         self.robot_address_label.setText(robot_ip or "로봇 찾는 중")
+        mapping = status.get("mapping")
+        if isinstance(mapping, dict):
+            self._update_mapping_status(mapping)
         self._set_controls_enabled(self.robot_connected)
 
         if self.robot_connected:
@@ -382,6 +432,14 @@ class UserMainWindow(QMainWindow):
             self._set_connection_status("●  로봇 다시 연결하는 중", "waiting")
             if self.vision is not None:
                 self.stop_vision()
+            if self.robot_follow_active:
+                # The link is down, so a follow_stop command cannot reliably
+                # reach the robot -- just reflect the honest local state.
+                # follow_person.py has its own safety net (stops within 1s if
+                # it loses the person) independent of this app's connection.
+                self.robot_follow_active = False
+                self.robot_follow_button.setChecked(False)
+                self.robot_follow_button.setText("로봇 자동 추적 시작 (베타)")
 
         state = (self.robot_connected, robot_ip)
         if state != self._last_robot_state:
@@ -400,11 +458,89 @@ class UserMainWindow(QMainWindow):
         elif self.vision_mode == "camera":
             self.stop_vision()
 
+    def _update_mapping_status(self, mapping: dict) -> None:
+        state = str(mapping.get("state") or "idle")
+        self.mapping_active = bool(mapping.get("enabled", False))
+        save_error = str(mapping.get("last_save_error") or "")
+        if state == "unavailable":
+            simple_status = "매핑 런타임 대기 중"
+        elif self.mapping_active:
+            simple_status = "매핑 중"
+        elif save_error:
+            simple_status = f"지도 저장 오류: {save_error}"
+        else:
+            simple_status = "대기 중"
+        self.mapping_status_label.setText(simple_status)
+
+    def start_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            QMessageBox.warning(self, "자동 매핑", "먼저 로봇 연결을 확인해주세요.")
+            return
+        if self.mapping_active:
+            return
+        answer = QMessageBox.question(
+            self,
+            "자동 매핑 출발 확인",
+            "로봇이 스스로 이동하며 주변을 탐색합니다.\n"
+            "작업 구역에 사람·동물·이동 장애물이 없고 비상 정지가 가능한 상태입니까?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.stop_vision()
+        self.stop_robot_follow()
+        self.client.mapping_action("start")
+        self.mapping_status_label.setText("자동 매핑 시작 요청 전송 중")
+        self.mode_label.setText("자동 매핑")
+
+    def stop_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            return
+        self.client.mapping_action("stop")
+        self.mapping_status_label.setText("매핑 정지 요청 전송 중")
+        if self.vision_mode is None and not self.robot_follow_active:
+            self.mode_label.setText("대기")
+
+    def save_mapping(self) -> None:
+        if self.client is None or not self.robot_connected:
+            QMessageBox.warning(self, "지도 저장", "먼저 로봇 연결을 확인해주세요.")
+            return
+        self.client.mapping_action("save")
+        self.mapping_status_label.setText("지도 저장 요청 전송 중")
+
     def toggle_follow(self, checked: bool) -> None:
         if checked:
+            self.stop_robot_follow()
             self._start_vision("follow")
         elif self.vision_mode == "follow":
             self.stop_vision()
+
+    def toggle_robot_follow(self, checked: bool) -> None:
+        if not checked:
+            self.stop_robot_follow()
+            return
+        if not self.robot_connected or self.client is None:
+            self.robot_follow_button.setChecked(False)
+            QMessageBox.warning(self, "로봇 자동 추적", "먼저 로봇 연결을 확인해주세요.")
+            return
+        # Two autonomous motion sources fighting over the motors is a real
+        # safety hazard, not just UX polish -- only one follow mode at a time.
+        self.stop_vision()
+        self.client.follow_action("start")
+        self.robot_follow_active = True
+        self.robot_follow_button.setChecked(True)
+        self.robot_follow_button.setText("로봇 자동 추적 중지")
+        self.mode_label.setText("로봇 자동 추적 (베타)")
+
+    def stop_robot_follow(self) -> None:
+        if not self.robot_follow_active:
+            return
+        if self.client is not None:
+            self.client.follow_action("stop")
+        self.robot_follow_active = False
+        self.robot_follow_button.setChecked(False)
+        self.robot_follow_button.setText("로봇 자동 추적 시작 (베타)")
+        if self.vision_mode is None:
+            self.mode_label.setText("대기")
 
     def _start_vision(self, mode: str) -> None:
         if not self.robot_connected or not self.current_robot_ip:
@@ -494,6 +630,7 @@ class UserMainWindow(QMainWindow):
             return
         if self.vision_mode == "follow":
             self.stop_vision()
+        self.stop_robot_follow()
         linear_speed, angular_speed = self.speed_combo.currentData()
         self.client.set_command(
             float(linear_speed) * linear_scale,
@@ -510,6 +647,12 @@ class UserMainWindow(QMainWindow):
     def emergency_stop(self) -> None:
         self._manual_keys.clear()
         self.stop_vision()
+        # robot_cmd_bridge.py's emergency_stop() only zeroes the current
+        # velocity once -- it does not call /follow_person/stop. If robot
+        # follow is left enabled, follow_person.py will push a fresh
+        # movement command on the very next detection frame and undo this
+        # e-stop, so it must be turned off explicitly and not just outrun.
+        self.stop_robot_follow()
         if self.client is not None:
             self.client.emergency_stop()
         self.mode_label.setText("긴급 정지")

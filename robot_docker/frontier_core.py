@@ -99,6 +99,43 @@ def cluster_frontiers(
     return clusters
 
 
+def unknown_region_size(
+    data: Sequence[int],
+    spec: GridSpec,
+    cluster: Iterable[int],
+    *,
+    cap: int = 4000,
+) -> int:
+    """Flood-fill the unknown cells reached from one frontier cluster.
+
+    ``frontier_length`` (cell count of the boundary itself) does not say how
+    much unmapped territory sits behind it: a long boundary can front a
+    shallow pocket, and a short one can open onto a large unexplored room.
+    This counts connected unknown cells (value < 0) reachable from the
+    cluster's free-side cells, capped so one huge open area cannot make
+    every score computation scan the whole remaining unknown map.
+    """
+
+    visited: set[int] = set()
+    pending: list[int] = []
+    for index in cluster:
+        for neighbor in _neighbors4(index, spec.width, spec.height):
+            if data[neighbor] < 0 and neighbor not in visited:
+                visited.add(neighbor)
+                pending.append(neighbor)
+    while pending and len(visited) < cap:
+        current = pending.pop()
+        for neighbor in _neighbors4(current, spec.width, spec.height):
+            if neighbor in visited:
+                continue
+            if data[neighbor] < 0:
+                visited.add(neighbor)
+                pending.append(neighbor)
+                if len(visited) >= cap:
+                    break
+    return len(visited)
+
+
 def grid_cell_to_world(grid_x: int, grid_y: int, spec: GridSpec) -> tuple[float, float]:
     local_x = (grid_x + 0.5) * spec.resolution
     local_y = (grid_y + 0.5) * spec.resolution
@@ -324,6 +361,60 @@ def cell_has_obstacle_clearance(
     return True
 
 
+def frontier_distance_weight(
+    *,
+    consecutive_goal_failures: int,
+    stuck_failure_threshold: int,
+    normal_distance_weight: float,
+    stuck_distance_weight: float,
+) -> float:
+    """Pick the distance penalty weight for frontier scoring.
+
+    Scoring normally favours the nearest frontier, which keeps repeated
+    attempts clustered around wherever the robot already is. Once failures
+    pile up there, relaxing the distance penalty (a smaller weight) lets a
+    farther frontier -- reached through already-mapped, previously-clear
+    space -- outscore yet another nearby approach to the same tight spot.
+    ``stuck_failure_threshold <= 0`` disables the relief and always returns
+    the normal weight.
+    """
+
+    if (
+        stuck_failure_threshold > 0
+        and consecutive_goal_failures >= stuck_failure_threshold
+    ):
+        return stuck_distance_weight
+    return normal_distance_weight
+
+
+def frontier_goal_step_distance(
+    *,
+    consecutive_goal_failures: int,
+    stuck_failure_threshold: int,
+    normal_step_distance: float,
+    stuck_step_distance: float,
+) -> float:
+    """Pick how far a staged goal is allowed to reach toward a frontier.
+
+    Nav2's global planner must find one continuous valid path to the staged
+    goal before the robot moves at all. Around clutter (chair and desk legs)
+    that plan can repeatedly fail for a target a full step away even though
+    the space is genuinely passable -- confirmed 2026-08-18 by manually
+    driving through a desk-leg gap with a sequence of much shorter,
+    frequently re-checked nudges after the same spot failed 30+ scored
+    frontier attempts in a row. Once failures pile up, shrink the goal step
+    so Nav2 only has to solve the same short, easy segment a careful manual
+    driver would take next, instead of continuing to fail on the longer one.
+    """
+
+    if (
+        stuck_failure_threshold > 0
+        and consecutive_goal_failures >= stuck_failure_threshold
+    ):
+        return stuck_step_distance
+    return normal_step_distance
+
+
 def frontier_candidates(
     data: Sequence[int],
     spec: GridSpec,
@@ -339,6 +430,8 @@ def frontier_candidates(
     staged_blacklist_radius: float = 0.15,
     gain_weight: float = 1.0,
     distance_weight: float = 0.45,
+    unknown_gain_weight: float = 0.0,
+    unknown_region_cap: int = 4000,
     goal_standoff: float = 0.0,
     maximum_goal_step_distance: float = 0.0,
     minimum_obstacle_clearance: float = 0.0,
@@ -350,6 +443,14 @@ def frontier_candidates(
     ``goal_standoff`` pulls each goal back from the changing unknown boundary
     into stable known-free space. This prevents a SLAM map update from turning
     the active Nav2 goal into an unknown cell while the robot is driving.
+
+    ``frontier_length`` alone favours a long boundary regardless of what is
+    behind it, which keeps sending the robot back toward the edges of
+    already-mapped sectors instead of into the larger unmapped ones.
+    ``unknown_gain_weight`` > 0 adds each cluster's reachable unknown area
+    (see ``unknown_region_size``) to the score, so a frontier opening onto a
+    big unexplored sector outscores one fronting a small mapped-in pocket
+    even at a similar boundary length and distance.
 
     ``minimum_path_obstacle_clearance`` can be stricter than the final goal's
     clearance. It allows the explorer to make a first pass through wide aisles
@@ -473,6 +574,12 @@ def frontier_candidates(
 
         frontier_length = len(cluster) * spec.resolution
         score = gain_weight * frontier_length - distance_weight * target_distance
+        if unknown_gain_weight > 0.0:
+            unknown_area_m2 = (
+                unknown_region_size(data, spec, cluster, cap=unknown_region_cap)
+                * spec.resolution**2
+            )
+            score += unknown_gain_weight * unknown_area_m2
         frontier_x, frontier_y = grid_cell_to_world(
             representative % spec.width,
             representative // spec.width,

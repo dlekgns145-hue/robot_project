@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self.current_robot_ip = ""
         self._last_robot_state: tuple[bool, str] | None = None
         self.follow_active = False
+        self.robot_follow_active = False
         self.vision_mode: str | None = None
         self._navigation_active = False
         self._mapping_active = False
@@ -252,6 +253,16 @@ class MainWindow(QMainWindow):
         self.navigation_button.setProperty("role", "secondary")
         self.navigation_button.setCheckable(True)
         self.navigation_button.clicked.connect(self.toggle_navigation)
+        # Distinct from follow_button: that one runs YOLO/pose inference here
+        # and drives the robot from this machine. This one tells the robot
+        # to follow using its own onboard camera and best.pt model
+        # (robot_docker/follow/follow_person.py) -- nothing runs locally
+        # while it's active, this app just sends the two trigger commands.
+        # Untested on real hardware as of 2026-08-19 (see HANDOFF.md).
+        self.robot_follow_button = QPushButton("로봇 자동 추적 (베타)")
+        self.robot_follow_button.setProperty("role", "secondary")
+        self.robot_follow_button.setCheckable(True)
+        self.robot_follow_button.clicked.connect(self.toggle_robot_follow)
         stop_features = QPushButton("전체 중지")
         stop_features.setProperty("role", "quiet")
         stop_features.clicked.connect(self.stop_all_features)
@@ -259,6 +270,7 @@ class MainWindow(QMainWindow):
             self.perception_button,
             self.follow_button,
             self.navigation_button,
+            self.robot_follow_button,
             stop_features,
         ):
             button.setMinimumHeight(40)
@@ -266,6 +278,7 @@ class MainWindow(QMainWindow):
         feature_buttons.addWidget(self.follow_button, 0, 1)
         feature_buttons.addWidget(self.navigation_button, 1, 0)
         feature_buttons.addWidget(stop_features, 1, 1)
+        feature_buttons.addWidget(self.robot_follow_button, 2, 0, 1, 2)
         follow_form.addRow(feature_buttons)
         follow_form.addRow("전진 속도", self.linear_speed)
         follow_form.addRow("회전 속도", self.angular_speed)
@@ -362,11 +375,11 @@ class MainWindow(QMainWindow):
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
         self.host_edit = QLineEdit()
-        self.host_edit.setPlaceholderText("예: 172.30.1.81 또는 127.0.0.1")
+        self.host_edit.setPlaceholderText("예: 192.168.64.16")
         self.command_port = QSpinBox()
         self.command_port.setRange(1, 65535)
         self.robot_host_edit = QLineEdit()
-        self.robot_host_edit.setPlaceholderText("예: raspberrypi.local")
+        self.robot_host_edit.setPlaceholderText("예: 172.30.1.10")
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("저장된 제어 토큰")
@@ -678,10 +691,10 @@ class MainWindow(QMainWindow):
         return super().event(event)
 
     def _load_settings(self) -> None:
-        self.host_edit.setText(self.settings_store.value("host", ""))
+        self.host_edit.setText(self.settings_store.value("host", "192.168.64.16"))
         self.command_port.setValue(int(self.settings_store.value("command_port", 9999)))
         self.robot_host_edit.setText(
-            self.settings_store.value("robot_host", "raspberrypi.local")
+            self.settings_store.value("robot_host", "172.30.1.10")
         )
         self.token_edit.setText(self.settings_store.value("token", ""))
         source = self.settings_store.value("camera_source", "robot")
@@ -784,6 +797,12 @@ class MainWindow(QMainWindow):
     def disconnect_robot(self) -> None:
         self._manual_keys.clear()
         client = self.client
+        # follow_action() no-ops once client.stop() has requested shutdown,
+        # so send follow_stop while the command queue can still flush it --
+        # client.stop()'s own emergency_stop() zeroes velocity but does not
+        # call /follow_person/stop, so this would otherwise leave the robot
+        # still trying to follow after the app disconnects.
+        self.stop_robot_follow()
         if client is not None:
             # Latch emergency stop before waiting for camera/navigation shutdown.
             client.stop()
@@ -1085,6 +1104,36 @@ class MainWindow(QMainWindow):
         else:
             self.stop_vision()
 
+    def toggle_robot_follow(self, checked: bool) -> None:
+        if not checked:
+            self.stop_robot_follow()
+            return
+        if self.client is None or not self.robot_connected:
+            self.robot_follow_button.setChecked(False)
+            QMessageBox.warning(
+                self, "로봇 자동 추적", "먼저 Ubuntu VM과 로봇에 연결하세요."
+            )
+            return
+        # Two autonomous motion sources fighting over the motors is a real
+        # safety hazard, not just UX polish -- only one follow/nav mode at a time.
+        self.stop_vision()
+        self.stop_navigation()
+        self.client.follow_action("start")
+        self.robot_follow_active = True
+        self.robot_follow_button.setChecked(True)
+        self.robot_follow_button.setText("로봇 자동 추적 중지 (베타)")
+        self.append_log("로봇 자동 추적 시작 (베타)")
+
+    def stop_robot_follow(self) -> None:
+        if not self.robot_follow_active:
+            return
+        if self.client is not None:
+            self.client.follow_action("stop")
+        self.robot_follow_active = False
+        self.robot_follow_button.setChecked(False)
+        self.robot_follow_button.setText("로봇 자동 추적 (베타)")
+        self.append_log("로봇 자동 추적 중지 (베타)")
+
     def toggle_perception(self, checked: bool) -> None:
         if checked:
             self.start_perception()
@@ -1104,6 +1153,7 @@ class MainWindow(QMainWindow):
         self._start_vision("follow")
 
     def _start_vision(self, mode: str) -> None:
+        self.stop_robot_follow()
         if self.vision is not None:
             if self.vision_mode == mode:
                 return
@@ -1253,6 +1303,7 @@ class MainWindow(QMainWindow):
                 "먼저 Ubuntu VM과 로봇에 연결하세요.",
             )
             return
+        self.stop_robot_follow()
         if self._mapping_active:
             self.navigation_button.setChecked(False)
             QMessageBox.warning(
@@ -1302,6 +1353,7 @@ class MainWindow(QMainWindow):
     def stop_all_features(self) -> None:
         self.stop_vision()
         self.stop_navigation()
+        self.stop_robot_follow()
         self.stop_motion()
         self.append_log("전체 기능 중지")
 
@@ -1320,6 +1372,7 @@ class MainWindow(QMainWindow):
             return
         self.stop_vision()
         self.stop_navigation()
+        self.stop_robot_follow()
         linear = self.linear_speed.value() * linear_scale
         angular = self.angular_speed.value() * angular_scale
         self.client.set_command(linear, angular)
@@ -1332,6 +1385,12 @@ class MainWindow(QMainWindow):
         self._manual_keys.clear()
         self.stop_vision()
         self.stop_navigation()
+        # robot_cmd_bridge.py's emergency_stop() only zeroes the current
+        # velocity once -- it does not call /follow_person/stop. If robot
+        # follow is left enabled, follow_person.py will push a fresh
+        # movement command on the very next detection frame and undo this
+        # e-stop, so it must be turned off explicitly and not just outrun.
+        self.stop_robot_follow()
         if self.client is not None:
             self.client.emergency_stop()
         self.append_log("긴급 정지 명령")

@@ -15,8 +15,11 @@ from frontier_core import (  # noqa: E402
     cluster_frontiers,
     frontier_candidates,
     frontier_cell_indices,
+    frontier_distance_weight,
+    frontier_goal_step_distance,
     grid_cell_to_world,
     reachable_free_cell_indices,
+    unknown_region_size,
     world_to_grid_cell,
 )
 
@@ -396,6 +399,213 @@ class FrontierCoreTests(unittest.TestCase):
     def test_invalid_grid_size_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             frontier_cell_indices([0], GridSpec(2, 2, 0.1))
+
+    def test_distance_weight_stays_normal_below_the_stuck_threshold(self) -> None:
+        weight = frontier_distance_weight(
+            consecutive_goal_failures=5,
+            stuck_failure_threshold=6,
+            normal_distance_weight=0.45,
+            stuck_distance_weight=0.15,
+        )
+
+        self.assertEqual(weight, 0.45)
+
+    def test_distance_weight_relaxes_at_the_stuck_threshold(self) -> None:
+        weight = frontier_distance_weight(
+            consecutive_goal_failures=6,
+            stuck_failure_threshold=6,
+            normal_distance_weight=0.45,
+            stuck_distance_weight=0.15,
+        )
+
+        self.assertEqual(weight, 0.15)
+
+    def test_distance_weight_relief_can_be_disabled(self) -> None:
+        weight = frontier_distance_weight(
+            consecutive_goal_failures=50,
+            stuck_failure_threshold=0,
+            normal_distance_weight=0.45,
+            stuck_distance_weight=0.15,
+        )
+
+        self.assertEqual(weight, 0.45)
+
+    def test_goal_step_distance_stays_normal_below_the_stuck_threshold(self) -> None:
+        step = frontier_goal_step_distance(
+            consecutive_goal_failures=5,
+            stuck_failure_threshold=6,
+            normal_step_distance=1.0,
+            stuck_step_distance=0.35,
+        )
+
+        self.assertEqual(step, 1.0)
+
+    def test_goal_step_distance_shrinks_at_the_stuck_threshold(self) -> None:
+        step = frontier_goal_step_distance(
+            consecutive_goal_failures=6,
+            stuck_failure_threshold=6,
+            normal_step_distance=1.0,
+            stuck_step_distance=0.35,
+        )
+
+        self.assertEqual(step, 0.35)
+
+    def test_goal_step_distance_relief_can_be_disabled(self) -> None:
+        step = frontier_goal_step_distance(
+            consecutive_goal_failures=50,
+            stuck_failure_threshold=0,
+            normal_step_distance=1.0,
+            stuck_step_distance=0.35,
+        )
+
+        self.assertEqual(step, 1.0)
+
+    def test_stuck_goal_step_distance_produces_a_shorter_staged_goal(self) -> None:
+        # Same corridor as test_far_frontier_is_staged_along_connected_free_path,
+        # just scored with the shrunken stuck-relief step instead of the
+        # normal one. The staged goal must land closer to the robot.
+        spec = GridSpec(width=45, height=5, resolution=0.1)
+        data = [-1] * (spec.width * spec.height)
+        for x in range(1, 44):
+            for y in range(1, 4):
+                data[y * spec.width + x] = 0
+
+        candidates = frontier_candidates(
+            data,
+            spec,
+            robot_x=0.25,
+            robot_y=0.25,
+            min_cells=2,
+            min_distance=0.15,
+            max_distance=7.0,
+            goal_standoff=0.1,
+            maximum_goal_step_distance=0.35,
+        )
+
+        self.assertTrue(candidates)
+        self.assertLessEqual(candidates[0].distance, 0.36)
+
+    def test_distance_weight_parameter_reaches_frontier_scoring(self) -> None:
+        # Reuses the two-cluster map from
+        # test_far_frontier_is_staged_along_connected_free_path: a near
+        # cluster and a longer, larger one further off. At the normal weight
+        # distance dominates and the near cluster wins; a relaxed weight
+        # (as frontier_distance_weight returns once stuck) must let frontier
+        # size compete, changing which candidate sorts first.
+        width, height = 20, 6
+        data = [-1] * (width * height)
+
+        def set_cell(x: int, y: int, value: int) -> None:
+            data[y * width + x] = value
+
+        for x in range(width):
+            for y in range(height):
+                set_cell(x, y, 0)
+        for x in range(3, 6):
+            set_cell(x, 2, -1)
+        for x in range(14, 20):
+            for y in range(1, 5):
+                set_cell(x, y, -1)
+        spec = GridSpec(width=width, height=height, resolution=0.1)
+
+        near_first = frontier_candidates(
+            data, spec, robot_x=0.15, robot_y=0.25, min_cells=1, distance_weight=5.0
+        )
+        far_first = frontier_candidates(
+            data, spec, robot_x=0.15, robot_y=0.25, min_cells=1, distance_weight=0.0
+        )
+
+        self.assertTrue(near_first)
+        self.assertTrue(far_first)
+        self.assertNotEqual(
+            (near_first[0].frontier_x, near_first[0].frontier_y),
+            (far_first[0].frontier_x, far_first[0].frontier_y),
+        )
+
+    def test_unknown_region_size_counts_connected_unknown_cells(self) -> None:
+        width, height = 10, 5
+        data = [0] * (width * height)
+        data[2 * width + 8] = -1
+        spec = GridSpec(width=width, height=height, resolution=0.1)
+
+        size = unknown_region_size(data, spec, [2 * width + 7])
+
+        self.assertEqual(size, 1)
+
+    def test_unknown_region_size_grows_with_a_larger_pocket(self) -> None:
+        width, height = 10, 6
+        data = [0] * (width * height)
+        for y in range(0, 4):
+            for x in range(7, 10):
+                data[y * width + x] = -1
+        spec = GridSpec(width=width, height=height, resolution=0.1)
+
+        size = unknown_region_size(data, spec, [2 * width + 6])
+
+        self.assertEqual(size, 12)
+
+    def test_unknown_region_size_respects_the_cap(self) -> None:
+        width, height = 40, 40
+        data = [-1] * (width * height)
+        data[width * (height // 2) + 1] = 0
+        spec = GridSpec(width=width, height=height, resolution=0.1)
+
+        size = unknown_region_size(
+            data, spec, [width * (height // 2) + 1], cap=50
+        )
+
+        self.assertEqual(size, 50)
+
+    def test_unknown_gain_weight_prefers_the_larger_unmapped_sector(self) -> None:
+        # Two doorways off one small room, equidistant from the robot: a
+        # narrow gap into a big unmapped area on the left, a similar gap
+        # into a tiny pocket on the right. Frontier length and distance are
+        # close enough that a real unknown_gain_weight should decide it.
+        width, height = 24, 9
+        wall = 100
+        data = [wall] * (width * height)
+
+        def set_cell(x: int, y: int, value: int) -> None:
+            data[y * width + x] = value
+
+        for x in range(10, 14):
+            for y in range(3, 6):
+                set_cell(x, y, 0)
+        set_cell(9, 4, 0)
+        set_cell(14, 4, 0)
+        for x in range(1, 9):
+            for y in range(1, 8):
+                set_cell(x, y, -1)
+        for x in range(15, 17):
+            for y in range(3, 6):
+                set_cell(x, y, -1)
+        spec = GridSpec(width=width, height=height, resolution=0.2)
+
+        unweighted = frontier_candidates(
+            data,
+            spec,
+            robot_x=2.3,
+            robot_y=0.9,
+            min_cells=1,
+            distance_weight=0.1,
+            unknown_gain_weight=0.0,
+        )
+        weighted = frontier_candidates(
+            data,
+            spec,
+            robot_x=2.3,
+            robot_y=0.9,
+            min_cells=1,
+            distance_weight=0.1,
+            unknown_gain_weight=5.0,
+        )
+
+        self.assertGreaterEqual(len(unweighted), 2)
+        self.assertGreaterEqual(len(weighted), 2)
+        # The doorway toward the big left room (lower grid_x) must win once
+        # unknown area counts, regardless of which side the plain boundary
+        # -length/-distance score preferred.
+        self.assertLess(weighted[0].grid_x, 12)
 
 
 if __name__ == "__main__":

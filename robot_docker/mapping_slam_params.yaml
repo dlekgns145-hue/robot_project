@@ -22,7 +22,11 @@ slam_toolbox:
     # scan matching and Nav2 on the Raspberry Pi.
     transform_publish_period: 0.05
     map_update_interval: 2.0
-    resolution: 0.05
+    # Raised from 0.05: at ~26 m^2 the Pi5 fell behind (load avg ~3.8/4
+    # cores, /map dropped to ~0.5 Hz), stalling scan matching and starving
+    # Nav2's planner of a fresh pose. Coarser cells cut scan-match/pose-graph
+    # cost roughly in half while staying well under the 0.22 m robot radius.
+    resolution: 0.075
     max_laser_range: 4.0
     minimum_time_interval: 0.2
     # Scans are stamped to an exact /odom_nav transform by scan_time_fix.

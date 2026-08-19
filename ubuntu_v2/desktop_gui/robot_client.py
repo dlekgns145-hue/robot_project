@@ -105,6 +105,16 @@ class RobotClient(QThread):
             self._pending_commands.append({"type": command_type})
             self._command = {"type": "ping"}
 
+    def follow_action(self, action: str) -> None:
+        command_type = f"follow_{action}"
+        if command_type not in {"follow_start", "follow_stop"}:
+            raise ValueError(f"unsupported follow action: {action}")
+        if self._shutdown_requested.is_set():
+            return
+        with self._command_lock:
+            self._pending_commands.append({"type": command_type})
+            self._command = {"type": "ping"}
+
     def release_control(self) -> None:
         """Keep status polling alive without publishing a motor command."""
 

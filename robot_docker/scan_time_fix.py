@@ -20,10 +20,10 @@ from sensor_msgs.msg import LaserScan
 SELF_REFLECTION_MIN_ANGLE_DEG = -155.0
 SELF_REFLECTION_MAX_ANGLE_DEG = -145.0
 SELF_REFLECTION_MAX_RANGE_M = 0.22
-# The measured housing return jitters a few hundredths of a degree around
-# -172 degrees. Leave angular margin while retaining the strict 0.16 m range
-# cap: an external object cannot occupy that range inside the robot chassis.
-REAR_HOUSING_MIN_ANGLE_DEG = -175.0
+# The rear housing return was observed across the scan seam, including -177
+# degrees. Cover the full rear-left seam while retaining the strict 0.16 m
+# range cap: an external object cannot occupy that range inside the chassis.
+REAR_HOUSING_MIN_ANGLE_DEG = -180.0
 REAR_HOUSING_MAX_ANGLE_DEG = -164.0
 REAR_HOUSING_MAX_RANGE_M = 0.16
 

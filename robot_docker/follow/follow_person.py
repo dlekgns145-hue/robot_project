@@ -47,7 +47,15 @@ class FollowPersonNode(Node):
 
         self.sub = self.create_subscription(
             Float32MultiArray, '/person_detection', self.detection_callback, 10)
-        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Publish to /cmd_vel_follow, not /cmd_vel directly. robot_cmd_bridge.py
+        # is the single-point owner of /cmd_vel (it warns on publisher contention
+        # if anything else writes there). /cmd_vel_server exists but is gated to
+        # navigation_mode (Nav2/mapping only) -- a follow command sent there would
+        # be silently dropped since navigation_mode is off while following.
+        # robot_cmd_bridge.py relays /cmd_vel_follow through the same publish_cmd()
+        # path GUI manual driving uses, so follow-mode inherits the existing LiDAR
+        # obstacle-avoidance state machine and command-timeout safety stop.
+        self.pub = self.create_publisher(Twist, '/cmd_vel_follow', 10)
 
         self.create_service(Trigger, '/follow_person/start', self._handle_start)
         self.create_service(Trigger, '/follow_person/stop', self._handle_stop)

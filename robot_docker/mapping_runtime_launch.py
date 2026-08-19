@@ -75,10 +75,13 @@ def generate_launch_description():
             "planner_server.ros__parameters.GridBased.tolerance": "0.10",
             "controller_server.ros__parameters.general_goal_checker.xy_goal_tolerance": "0.15",
             "controller_server.ros__parameters.FollowPath.xy_goal_tolerance": "0.15",
-            # Mapping and exploration are deliberately LiDAR-only.  Camera
-            # imagery may be georeferenced later, but it must never affect the
-            # occupancy grid or the path used to create it.
-            "observation_sources": "scan",
+            # Keep the source-specific YAML intact: both costmaps and
+            # slam_toolbox are LiDAR-only (dwb_nav_params_fixed.yaml,
+            # 2026-08-19 -- monocular camera obstacles used to also feed the
+            # local costmap, but a single unreliable reading there could
+            # veto an entire Nav2 plan or recovery maneuver up front).
+            # Camera obstacle avoidance still runs, but only reactively on
+            # the live motor command in robot_cmd_bridge.py.
         },
         convert_types=True,
     )

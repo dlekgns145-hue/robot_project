@@ -97,10 +97,18 @@ class ServerImageTests(unittest.TestCase):
     def test_mapping_server_is_lidar_only(self):
         entrypoint = (ROOT / "robot_docker" / "entrypoint.sh").read_text()
         launch_file = (ROOT / "robot_docker" / "mapping_runtime_launch.py").read_text()
+        nav_params = (
+            ROOT / "robot_docker" / "recovered" / "dwb_nav_params_fixed.yaml"
+        ).read_text()
         self.assertNotIn("visual_mapper_enabled", entrypoint)
         self.assertNotIn('package="orchard_mapper"', launch_file)
         self.assertNotIn("map_texture_recorder.py", launch_file)
-        self.assertIn('"observation_sources": "scan"', launch_file)
+        # A single unreliable camera reading in the local costmap could veto
+        # an entire Nav2 plan or recovery maneuver up front (2026-08-19) --
+        # both costmaps stay LiDAR-only; camera avoidance is reactive-only,
+        # applied directly to the live motor command in robot_cmd_bridge.py.
+        self.assertNotIn("observation_sources: scan camera", nav_params)
+        self.assertIn("observation_sources: scan", nav_params)
 
     def test_bundle_builder_does_not_copy_desktop_gui(self):
         builder = (ROOT / "server_image" / "build_server_image.sh").read_text()

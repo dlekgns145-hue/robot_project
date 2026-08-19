@@ -159,8 +159,23 @@ def _weighted_median(values: list[float], weights: list[float]) -> float:
 
 
 def estimate_wall_correction(
-    image: np.ndarray, resolution: float, config: PostprocessConfig
+    image: np.ndarray,
+    resolution: float,
+    config: PostprocessConfig,
+    *,
+    clamp_deg: float | None = None,
 ) -> tuple[float, dict[str, Any]]:
+    """Estimate the rotation that squares detected walls to the axes.
+
+    ``clamp_deg`` defaults to ``config.maximum_correction_deg`` (the
+    navigation-safe default: a large correction from noisy Hough lines
+    could misalign the pose transform used for real navigation). Pass a
+    larger value (see ``cutout_room_rectangle``) for a visualization-only
+    caller that wants the full correction even past that clamp.
+    """
+
+    if clamp_deg is None:
+        clamp_deg = config.maximum_correction_deg
     occupied = ((image == OCCUPIED) * 255).astype(np.uint8)
     minimum_length = max(6, round(config.minimum_hough_line_m / resolution))
     maximum_gap = max(1, round(config.maximum_hough_gap_m / resolution))
@@ -196,10 +211,7 @@ def estimate_wall_correction(
     diagnostics["angle_spread_deg"] = round(spread, 3)
     if spread > config.maximum_angle_spread_deg:
         return 0.0, diagnostics
-    correction = max(
-        -config.maximum_correction_deg,
-        min(config.maximum_correction_deg, center),
-    )
+    correction = max(-clamp_deg, min(clamp_deg, center))
     if abs(correction) < 0.15:
         correction = 0.0
     diagnostics["angle_confident"] = True
@@ -431,6 +443,358 @@ def crop_to_known(
         "crop_left": left,
         "crop_right": int(image.shape[1] - right),
     }
+
+
+def cutout_room_rectangle(
+    image: np.ndarray,
+    metadata: dict[str, Any],
+    margin_m: float = 0.10,
+    config: PostprocessConfig | None = None,
+) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Rotate and crop a corrected map down to just its known rectangle.
+
+    ``estimate_wall_correction``/``process_map`` deliberately clamp their
+    rotation to ``maximum_correction_deg`` (12 degrees) since a large
+    correction from noisy Hough lines could misalign the safety-critical
+    navigation pose transform. That leaves a room whose true skew exceeds
+    the clamp still shown as a rotated diamond padded by unknown-space
+    corners. This is a separate, visualization-only cutout: it reuses the
+    same wall-detecting Hough-line estimate but with the clamp raised to 45
+    degrees (the full range the deviation-from-nearest-right-angle math can
+    express), rotates by that full correction, and crops tightly to the
+    result, leaving just the room's rectangle with a small margin. A
+    min-area-rect fit around the *whole* known-pixel blob was tried first
+    and rejected -- exploration frontiers and doorway alcoves make that
+    outline irregular enough to throw off its angle, where the wall
+    segments themselves stay a reliable signal. Not used for the
+    navigation pose bundle.
+    """
+
+    config = config or PostprocessConfig()
+    resolution = float(metadata["resolution"])
+    correction_deg, angle_report = estimate_wall_correction(
+        image, resolution, config, clamp_deg=45.0
+    )
+    rotated, rotated_metadata, _matrix = _rotate_map_with_matrix(
+        image, metadata, correction_deg
+    )
+    cropped, final_metadata, crop_report = crop_to_known(
+        rotated, rotated_metadata, margin_m
+    )
+    return (
+        cropped,
+        final_metadata,
+        {
+            "cutout_angle_deg": round(correction_deg, 4),
+            **angle_report,
+            **crop_report,
+        },
+    )
+
+
+def _skeletonize(mask: np.ndarray) -> np.ndarray:
+    """Thin a binary mask (0/255) down to its 1-pixel-wide centerline."""
+
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    skeleton = np.zeros_like(mask)
+    working = mask.copy()
+    while cv2.countNonZero(working) > 0:
+        eroded = cv2.erode(working, element)
+        opened = cv2.dilate(eroded, element)
+        skeleton = cv2.bitwise_or(skeleton, cv2.subtract(working, opened))
+        working = eroded
+    return skeleton
+
+
+def _largest_component_mask(
+    occupied_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int] | None:
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        occupied_mask, connectivity=8
+    )
+    if count <= 1:
+        return None
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return labels, (labels == label).astype(np.uint8) * 255, label
+
+
+def _segment_max_deviation(
+    points: np.ndarray, start_index: int, end_index: int
+) -> float:
+    """Max perpendicular distance of a contour stretch from its own chord."""
+
+    n = len(points)
+    indices = [start_index]
+    i = start_index
+    while i != end_index:
+        i = (i + 1) % n
+        indices.append(i)
+    if len(indices) <= 2:
+        return 0.0
+    start = points[start_index].astype(np.float64)
+    end = points[end_index].astype(np.float64)
+    chord = end - start
+    chord_length = float(np.hypot(*chord))
+    if chord_length < 1e-6:
+        return float(
+            np.max(np.hypot(*(points[indices].astype(np.float64) - start).T))
+        )
+    normal = np.array([-chord[1], chord[0]]) / chord_length
+    offsets = points[indices].astype(np.float64) - start
+    return float(np.max(np.abs(offsets @ normal)))
+
+
+def classify_wall_straight_and_curved(
+    image: np.ndarray,
+    *,
+    max_thickness_px: int = 2,
+    straight_tolerance_px: float = 2.0,
+    polygon_epsilon_px: float = 10.0,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Redraw the wall as straight lines where straight, curves where curved.
+
+    Visualization only -- the corrected/cropped occupancy data used for
+    navigation is untouched by this step. Walls only: the single largest
+    connected occupied component. Earlier versions either forced every
+    stretch straight (flattened real curves) or forced every stretch
+    smoothly curved (blurred real corners); this instead simplifies the
+    wall's own contour with ``cv2.approxPolyDP`` to find candidate corners,
+    then for each stretch between two consecutive corners checks how far
+    the original traced boundary bows away from the straight chord between
+    them (``straight_tolerance_px``) -- a stretch within tolerance is
+    redrawn as one straight line, a stretch that genuinely bows out is
+    redrawn as its own original points (a real curve, left curved).
+    ``polygon_epsilon_px`` must stay noticeably coarser than
+    ``straight_tolerance_px``: approxPolyDP adapts vertex density to
+    curvature, so at a fine epsilon it already places extra vertices along
+    a real curve until each individual short chord has tiny deviation --
+    every stretch then looks "straight" by construction, misclassifying an
+    actual circle as 16 flat segments (caught 2026-08-19). A coarse
+    epsilon forces long chords across curved stretches, so their real
+    deviation from the arc stays large enough to classify correctly. Drawn
+    at ``min(max_thickness_px, the wall's own measured thickness)``. Every
+    other occupied pixel (desk and chair marks) is left exactly as it was.
+    """
+
+    occupied_mask = ((image == OCCUPIED) * 255).astype(np.uint8)
+    found = _largest_component_mask(occupied_mask)
+    if found is None:
+        return image.copy(), {"straight_segments": 0, "curved_segments": 0}
+    _labels, wall_mask, _label = found
+
+    distances = cv2.distanceTransform(wall_mask, cv2.DIST_L2, 3)
+    measured_thickness = max(1, int(round(2 * float(np.median(distances[wall_mask > 0])))))
+    thickness_px = max(1, min(max_thickness_px, measured_thickness))
+
+    contours, _hierarchy = cv2.findContours(
+        wall_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+    )
+    line_layer = np.zeros_like(occupied_mask)
+    straight_segments = 0
+    curved_segments = 0
+    for contour in contours:
+        points = contour.reshape(-1, 2)
+        if len(points) < 3:
+            continue
+        simplified = cv2.approxPolyDP(contour, polygon_epsilon_px, True).reshape(-1, 2)
+        if len(simplified) < 2:
+            continue
+        # approxPolyDP's chosen vertices are a subset of `points` in their
+        # original cyclic order, but a jagged real contour can revisit the
+        # same pixel coordinate more than once (a tight notch touching
+        # itself). Matching purely by coordinate (e.g. np.where's first
+        # hit) can then jump backwards to an earlier duplicate and corrupt
+        # the whole cyclic walk below, silently dropping stretches of wall
+        # (found on the real classroom map, 2026-08-19: only two of its
+        # eight sides were ever redrawn). Searching forward from the last
+        # match instead respects the contour's actual order.
+        n_points = len(points)
+        indices = []
+        search_start = 0
+        for vertex in simplified:
+            found_index = None
+            for offset in range(n_points):
+                candidate = (search_start + offset) % n_points
+                if points[candidate][0] == vertex[0] and points[candidate][1] == vertex[1]:
+                    found_index = candidate
+                    break
+            if found_index is None:
+                continue
+            indices.append(found_index)
+            search_start = (found_index + 1) % n_points
+        if len(indices) < 2:
+            continue
+        for i in range(len(indices)):
+            start_index = indices[i]
+            end_index = indices[(i + 1) % len(indices)]
+            deviation = _segment_max_deviation(points, start_index, end_index)
+            if deviation <= straight_tolerance_px:
+                cv2.line(
+                    line_layer,
+                    tuple(points[start_index]),
+                    tuple(points[end_index]),
+                    255,
+                    thickness_px,
+                )
+                straight_segments += 1
+            else:
+                n = len(points)
+                stretch_indices = [start_index]
+                j = start_index
+                while j != end_index:
+                    j = (j + 1) % n
+                    stretch_indices.append(j)
+                stretch = points[stretch_indices].reshape(-1, 1, 2)
+                cv2.polylines(line_layer, [stretch], False, 255, thickness_px)
+                curved_segments += 1
+
+    # Each stretch above is drawn independently, and integer-rounded pixel
+    # endpoints between adjacent stretches don't always land on the exact
+    # same pixel: overlapping strokes at a joint balloon its local
+    # thickness well past thickness_px (measured 7.4 px against a target
+    # of 2 on the real classroom map, 2026-08-19), while a joint that
+    # instead falls a pixel short fragments the loop into dozens of
+    # disconnected pieces (53 components measured, should be ~1). Closing
+    # small gaps, thinning back to a true centerline, then redilating to
+    # the target thickness normalizes every joint the same way regardless
+    # of which stretches happened to meet there.
+    if np.any(line_layer):
+        closed = cv2.morphologyEx(
+            line_layer, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        )
+        skeleton = _skeletonize(closed)
+        thickness_element = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (thickness_px, thickness_px)
+        )
+        line_layer = cv2.dilate(skeleton, thickness_element)
+
+    styled = image.copy()
+    styled[wall_mask > 0] = FREE
+    styled[line_layer > 0] = OCCUPIED
+    return styled, {
+        "straight_segments": straight_segments,
+        "curved_segments": curved_segments,
+        "thickness_px": thickness_px,
+    }
+
+
+def rectilinearize_wall(
+    image: np.ndarray,
+    *,
+    max_thickness_px: int = 2,
+    polygon_epsilon_px: float = 10.0,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Redraw the wall as a single right-angled (no curves) outline.
+
+    Visualization only -- the corrected/cropped occupancy data used for
+    navigation is untouched by this step. Walls only: the single largest
+    connected occupied component. ``classify_wall_straight_and_curved``
+    tried to also preserve genuine curves, drawing each stretch as its own
+    line or polyline -- but independently-drawn stretches meet at joints
+    whose rounded pixel endpoints don't quite land together, ballooning
+    some joints past the target thickness and fragmenting others into
+    dozens of disconnected pieces even after a closing/skeletonize cleanup
+    pass. A classroom's walls are right angles, not curves, so this skips
+    curve detection entirely: the contour is simplified to corner
+    candidates, and each real corner is connected to the next by inserting
+    one right-angle bend between them (two axis-aligned segments instead
+    of one diagonal one) -- the corners themselves are never moved, so
+    there is no risk of a moved corner shortcutting across one of a
+    non-convex room's real notches. The whole result is drawn in one
+    single closed
+    ``cv2.polylines`` call -- one continuous stroke has no internal joints
+    to mismatch in the first place. Every other occupied pixel (desk and
+    chair marks) is left exactly as it was.
+    """
+
+    occupied_mask = ((image == OCCUPIED) * 255).astype(np.uint8)
+    found = _largest_component_mask(occupied_mask)
+    if found is None:
+        return image.copy(), {"corners": 0, "thickness_px": 0}
+    _labels, wall_mask, _label = found
+
+    distances = cv2.distanceTransform(wall_mask, cv2.DIST_L2, 3)
+    measured_thickness = max(1, int(round(2 * float(np.median(distances[wall_mask > 0])))))
+    thickness_px = max(1, min(max_thickness_px, measured_thickness))
+
+    contours, _hierarchy = cv2.findContours(
+        wall_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    line_layer = np.zeros_like(occupied_mask)
+    corners = 0
+    for contour in contours:
+        simplified = cv2.approxPolyDP(contour, polygon_epsilon_px, True).reshape(-1, 2)
+        if len(simplified) < 2:
+            continue
+        # An earlier version moved each corner to snap the edge into it,
+        # chaining off the (already-moved) previous corner. For a simple
+        # convex room that mostly works, but this room has two real
+        # notches, and the chained snap plus a separate special case for
+        # the closing edge could shortcut across one -- drawing a
+        # spurious internal line nowhere near the actual wall (found on
+        # the real classroom map, 2026-08-19). Keep every real corner
+        # exactly where it was measured instead, and connect each
+        # consecutive pair with one inserted right-angle bend -- two
+        # axis-aligned segments instead of one diagonal one. No corner
+        # ever moves, and the same rule applies uniformly to the closing
+        # edge (index n-1 back to 0), so there is nothing to special-case.
+        n = len(simplified)
+        rectilinear = []
+        for i in range(n):
+            current = simplified[i].astype(np.float64)
+            following = simplified[(i + 1) % n].astype(np.float64)
+            rectilinear.append(current)
+            delta_x = following[0] - current[0]
+            delta_y = following[1] - current[1]
+            bend = (
+                np.array([following[0], current[1]])
+                if abs(delta_x) >= abs(delta_y)
+                else np.array([current[0], following[1]])
+            )
+            if not np.array_equal(bend, current) and not np.array_equal(bend, following):
+                rectilinear.append(bend)
+        polygon = np.round(np.array(rectilinear)).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(line_layer, [polygon], True, 255, thickness_px)
+        corners += n
+
+    styled = image.copy()
+    styled[wall_mask > 0] = FREE
+    styled[line_layer > 0] = OCCUPIED
+    return styled, {"corners": corners, "thickness_px": thickness_px}
+
+
+def mask_outside_wall_as_unknown(image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    """Hide free-space padding outside the wall; leave the room untouched.
+
+    Visualization only -- the corrected/cropped occupancy data used for
+    navigation is untouched by this step. ``cutout_room_rectangle``'s
+    rotate-then-crop canvas is an axis-aligned bounding box, which does not
+    exactly match a still-diagonal room's true silhouette -- it leaves a
+    padding sliver of "free" pixels technically outside the wall but
+    inside that box. Anything genuinely outside the wall's own outer
+    contour that is currently free is set to unknown instead; the wall
+    itself and everything on or inside it (the room's real interior and
+    every obstacle mark) is left exactly as it was.
+    """
+
+    occupied_mask = ((image == OCCUPIED) * 255).astype(np.uint8)
+    found = _largest_component_mask(occupied_mask)
+    if found is None:
+        return image.copy(), {"masked_pixels": 0}
+    _labels, wall_mask, _label = found
+    contours, _hierarchy = cv2.findContours(
+        wall_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return image.copy(), {"masked_pixels": 0}
+    largest_contour = max(contours, key=cv2.contourArea)
+    room_region = np.zeros_like(occupied_mask)
+    cv2.drawContours(room_region, [largest_contour], -1, 255, thickness=cv2.FILLED)
+
+    outside_and_free = (room_region == 0) & (image == FREE)
+    styled = image.copy()
+    styled[outside_and_free] = UNKNOWN
+    return styled, {"masked_pixels": int(np.count_nonzero(outside_and_free))}
 
 
 def _quality(image: np.ndarray, resolution: float) -> dict[str, Any]:
@@ -749,6 +1113,40 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input", help="one map prefix for a manual run")
     parser.add_argument("--output", help="corrected map prefix for a manual run")
+    parser.add_argument(
+        "--cutout",
+        action="store_true",
+        help="also rotate/crop the corrected map down to just its known "
+        "rectangle (visualization only, see cutout_room_rectangle)",
+    )
+    parser.add_argument(
+        "--mask-outside-wall",
+        action="store_true",
+        help="also hide free-space padding outside the wall as unknown "
+        "(visualization only, see mask_outside_wall_as_unknown)",
+    )
+    parser.add_argument(
+        "--classify-wall",
+        action="store_true",
+        help="also redraw the wall as straight lines where straight and "
+        "curves where curved, at up to 2 px thick (visualization only, "
+        "see classify_wall_straight_and_curved)",
+    )
+    parser.add_argument(
+        "--rectilinear-wall",
+        action="store_true",
+        help="also redraw the wall as a single right-angled outline (no "
+        "curves), at up to 2 px thick (visualization only, see "
+        "rectilinearize_wall)",
+    )
+    parser.add_argument(
+        "--keep-all-marks",
+        action="store_true",
+        help="disable process_map's small-noise removal for this run "
+        "(minimum_noise_area_m2=0) -- 2026-08-19: the default 0.0125 m^2 "
+        "threshold was removing 31 of 66 real obstacle marks on one "
+        "classroom map, not just sensor noise",
+    )
     parser.add_argument("--once", action="store_true", help="process queued jobs once")
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     return parser.parse_args()
@@ -760,7 +1158,26 @@ def main() -> None:
         raise SystemExit("--input and --output must be specified together")
     if args.input:
         raw, metadata = load_map(args.input)
-        corrected, corrected_metadata, report = process_map(raw, metadata)
+        run_config = (
+            PostprocessConfig(minimum_noise_area_m2=0.0)
+            if args.keep_all_marks
+            else None
+        )
+        corrected, corrected_metadata, report = process_map(raw, metadata, run_config)
+        if args.cutout:
+            corrected, corrected_metadata, cutout_report = cutout_room_rectangle(
+                corrected, corrected_metadata
+            )
+            report["cutout"] = cutout_report
+        if args.mask_outside_wall:
+            corrected, mask_report = mask_outside_wall_as_unknown(corrected)
+            report["mask_outside_wall"] = mask_report
+        if args.classify_wall:
+            corrected, classify_report = classify_wall_straight_and_curved(corrected)
+            report["classify_wall"] = classify_report
+        if args.rectilinear_wall:
+            corrected, rectilinear_report = rectilinearize_wall(corrected)
+            report["rectilinear_wall"] = rectilinear_report
         output = Path(args.output)
         _write_map(output, corrected, corrected_metadata)
         _atomic_write(

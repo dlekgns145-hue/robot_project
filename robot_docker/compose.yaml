@@ -136,6 +136,36 @@ services:
     depends_on:
       - camera
 
+  # Weight threshold detection (loadcell_guard.py). The HX711 is wired
+  # directly to the Pi5's own GPIO header, not through the ESP32/micro-ROS
+  # path, so this service needs no compute server and no dependency on
+  # agent/base -- it runs standalone even in mode A (robot-only, see
+  # HANDOFF.md 4절).
+  loadcell:
+    <<: *ros-service
+    container_name: robot-loadcell-guard
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
+    command: ["loadcell"]
+    privileged: true
+    volumes:
+      - /dev:/dev
+    environment:
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
+      ROBOT_LOADCELL_DT_PIN: "${ROBOT_LOADCELL_DT_PIN:-5}"
+      ROBOT_LOADCELL_SCK_PIN: "${ROBOT_LOADCELL_SCK_PIN:-6}"
+      # Calibration is per-physical-sensor and has no sane default -- see
+      # loadcell_guard.py's raw_to_grams(). Must be set after a real
+      # calibration (tare with an empty tray, then a known reference weight).
+      ROBOT_LOADCELL_TARE_OFFSET: "${ROBOT_LOADCELL_TARE_OFFSET:-0}"
+      ROBOT_LOADCELL_GRAMS_PER_COUNT: "${ROBOT_LOADCELL_GRAMS_PER_COUNT:-0.0}"
+      ROBOT_LOADCELL_LOW_THRESHOLD_G: "${ROBOT_LOADCELL_LOW_THRESHOLD_G:-0.0}"
+      ROBOT_LOADCELL_HIGH_THRESHOLD_G: "${ROBOT_LOADCELL_HIGH_THRESHOLD_G:-100000.0}"
+
   # Explicit profile: YOLO person detection publishes to /person_detection but
   # never touches /cmd_vel by itself -- follow-runtime is the one that moves.
   person-detect:
@@ -201,6 +231,7 @@ services:
     depends_on:
       - agent
       - base
+      - camera-safety
     volumes:
       - ./maps:/opt/robot-control/maps
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import math
 import os
 import sys
 import tempfile
@@ -40,6 +41,17 @@ class RecordingPublisher:
 
     def publish(self, message: Twist) -> None:
         self.messages.append(message)
+
+
+class NullLogger:
+    def error(self, *args, **kwargs) -> None:
+        pass
+
+    def warn(self, *args, **kwargs) -> None:
+        pass
+
+    def info(self, *args, **kwargs) -> None:
+        pass
 
 
 def load_bridge_module():
@@ -100,8 +112,12 @@ def load_bridge_module():
     spec = importlib.util.spec_from_file_location("robot_cmd_bridge_under_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, stubs):
-        spec.loader.exec_module(module)
+    sys.path.insert(0, str(path.parent))
+    try:
+        with patch.dict(sys.modules, stubs):
+            spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -126,10 +142,16 @@ class CommandLeaseTests(unittest.TestCase):
         node._last_scan_at = time.monotonic()
         node.front_min_dist = 10.0
         node.rear_min_dist = 10.0
+        node.front_blocked = False
+        node.avoid_state_start = time.time()
+        node.avoid_cycle_start = time.time()
+        node.left_history = []
+        node.right_history = []
         node._last_camera_scan_at = 0.0
         node.camera_front_min_dist = float("inf")
         node._remote_nav_state = "idle"
         node._remote_nav_sending_since = 0.0
+        node.get_logger = lambda: NullLogger()
         return node
 
     def test_stale_command_publishes_one_stop_then_releases_topic(self) -> None:
@@ -183,6 +205,52 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertEqual(len(node.pub.messages), 1)
         self.assertAlmostEqual(node.pub.messages[0].linear.x, 0.1)
         self.assertAlmostEqual(node.pub.messages[0].angular.z, -0.1)
+
+    def test_follow_command_drives_through_the_gui_motor_path(self) -> None:
+        node = self.make_node()
+        node.desired_linear = 0.0
+        node.desired_angular = 0.0
+        node._last_servo_pan_sent = None
+        command = Twist()
+        command.linear.x = 0.2
+        command.angular.z = 0.1
+
+        node.follow_cmd_callback(command)
+        node.control_loop()
+
+        self.assertAlmostEqual(node.desired_linear, 0.2)
+        self.assertAlmostEqual(node.desired_angular, 0.1)
+        self.assertEqual(len(node.pub.messages), 1)
+        self.assertAlmostEqual(node.pub.messages[0].linear.x, 0.2)
+
+    def test_navigation_mode_rejects_follow_commands_too(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.desired_linear = 0.0
+        node.desired_angular = 0.0
+        node._last_servo_pan_sent = None
+        command = Twist()
+        command.linear.x = 0.2
+        command.angular.z = 0.1
+
+        node.follow_cmd_callback(command)
+
+        self.assertEqual(node.desired_linear, 0.0)
+        self.assertEqual(node.desired_angular, 0.0)
+
+    def test_follow_command_with_non_finite_velocity_is_discarded(self) -> None:
+        node = self.make_node()
+        node.desired_linear = 0.0
+        node.desired_angular = 0.0
+        node._last_servo_pan_sent = None
+        command = Twist()
+        command.linear.x = float("nan")
+        command.angular.z = 0.1
+
+        node.follow_cmd_callback(command)
+
+        self.assertEqual(node.desired_linear, 0.0)
+        self.assertEqual(node.desired_angular, 0.0)
 
     def test_pure_rotation_is_boosted_over_motor_deadzone(self) -> None:
         linear, angular = self.bridge.shape_server_velocity(0.0, 0.08)
@@ -254,6 +322,167 @@ class CommandLeaseTests(unittest.TestCase):
         node.control_loop()
 
         self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+
+    def test_side_camera_obstacle_is_left_to_nav2_costmap(self) -> None:
+        node = self.make_node()
+        scan = types.SimpleNamespace(
+            angle_min=math.radians(-35.0),
+            angle_increment=math.radians(1.0),
+            range_min=0.22,
+            ranges=[math.inf] * 71,
+        )
+        # A desk leg near the right edge of the former +/-30 degree bridge
+        # sector must remain in Nav2's camera costmap without globally
+        # disabling forward motion at the motor bridge.
+        scan.ranges[7] = 0.24  # -28 degrees
+
+        node.camera_scan_callback(scan)
+
+        self.assertTrue(math.isinf(node.camera_front_min_dist))
+
+    def test_central_camera_obstacle_remains_in_hard_stop_corridor(self) -> None:
+        node = self.make_node()
+        scan = types.SimpleNamespace(
+            angle_min=math.radians(-35.0),
+            angle_increment=math.radians(1.0),
+            range_min=0.22,
+            ranges=[math.inf] * 71,
+        )
+        scan.ranges[35] = 0.24
+
+        node.camera_scan_callback(scan)
+
+        self.assertAlmostEqual(node.camera_front_min_dist, 0.24)
+
+    def test_critical_camera_obstacle_allows_pure_recovery_rotation(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_angular = 0.18
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.22
+
+        node.control_loop()
+
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+        self.assertAlmostEqual(node.pub.messages[0].angular.z, 0.18)
+
+    def test_critical_camera_obstacle_creeps_forward_instead_of_stopping(self) -> None:
+        # A full stop here treated every close camera reading -- real or a
+        # false positive -- as an absolute wall, and combined with Nav2's
+        # own spin collision check also refusing rotation in the same tight
+        # quarters, left no automatic way out even where a careful manual
+        # driver had already proven the space passable (2026-08-19).
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = 0.1
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.22
+
+        node.control_loop()
+
+        self.assertAlmostEqual(
+            node.pub.messages[0].linear.x, self.bridge.CAMERA_CRITICAL_CREEP_SPEED
+        )
+        self.assertEqual(node._navigation_safety_reason, "camera_critical_creep")
+
+    def test_critical_camera_obstacle_creeps_backward_when_reversing(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = -0.1
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.22
+
+        node.control_loop()
+
+        self.assertAlmostEqual(
+            node.pub.messages[0].linear.x, -self.bridge.CAMERA_CRITICAL_CREEP_SPEED
+        )
+
+    def test_critical_camera_creep_still_stops_for_a_close_lidar_front_reading(
+        self,
+    ) -> None:
+        # The camera's own near-field reading is unreliable enough to creep
+        # through rather than trust outright, but LiDAR is not -- it must
+        # keep its full hard stop even while the camera gate is creeping.
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = 0.1
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.22
+        node.front_min_dist = 0.30
+
+        node.control_loop()
+
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+        self.assertEqual(node._navigation_safety_reason, "lidar_front")
+
+    def test_critical_camera_creep_still_stops_for_a_close_lidar_rear_reading(
+        self,
+    ) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = -0.1
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.22
+        node.rear_min_dist = 0.30
+
+        node.control_loop()
+
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+        self.assertEqual(node._navigation_safety_reason, "lidar_rear")
+
+    def test_safety_status_reason_stays_clear_for_a_side_obstacle(self) -> None:
+        # autonomous_mapping.py's safety-block timer only starts for the
+        # blocking reasons; a side obstacle must stay "clear" here or the
+        # mapper would think a forward request it never actually blocked
+        # is being held back.
+        node = self.make_node()
+        scan = types.SimpleNamespace(
+            angle_min=math.radians(-35.0),
+            angle_increment=math.radians(1.0),
+            range_min=0.22,
+            ranges=[math.inf] * 71,
+        )
+        scan.ranges[7] = 0.24  # -28 degrees, outside the +/-12 hard-stop corridor
+        node.camera_scan_callback(scan)
+        node.navigation_mode = True
+        node.server_linear = 0.1
+        node.last_server_cmd_at = time.monotonic()
+
+        node.control_loop()
+
+        self.assertEqual(node._navigation_safety_reason, "clear")
+        self.assertAlmostEqual(node.pub.messages[0].linear.x, 0.1)
+
+    def test_safety_status_reason_flags_a_central_obstacle(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_linear = 0.1
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.4
+
+        node.control_loop()
+
+        self.assertEqual(node._navigation_safety_reason, "camera_front")
+        self.assertEqual(node.pub.messages[0].linear.x, 0.0)
+
+    def test_safety_status_reason_stays_clear_during_pure_rotation(self) -> None:
+        node = self.make_node()
+        node.navigation_mode = True
+        node.server_angular = 0.18
+        node.last_server_cmd_at = time.monotonic()
+        node._last_camera_scan_at = time.monotonic()
+        node.camera_front_min_dist = 0.22
+
+        node.control_loop()
+
+        self.assertEqual(node._navigation_safety_reason, "clear")
 
     def test_rear_lidar_obstacle_blocks_server_reverse_motion(self) -> None:
         node = self.make_node()

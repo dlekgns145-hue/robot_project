@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class FakeNode:
@@ -85,6 +86,9 @@ class NavigationRecoveryTests(unittest.TestCase):
         )
         self.assertTrue(
             self.scan_filter.is_self_reflection(math.radians(-172.1), 0.12)
+        )
+        self.assertTrue(
+            self.scan_filter.is_self_reflection(math.radians(-177.0), 0.121)
         )
 
     def test_front_obstacle_is_not_filtered(self) -> None:
@@ -268,6 +272,8 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn('"/slam_toolbox/serialize_map"', autonomous_source)
         self.assertIn('"/slam_toolbox/deserialize_map"', autonomous_source)
         self.assertIn('"minimum_battery_percent", 25', autonomous_source)
+        self.assertIn('"resume_pose_graph", False', autonomous_source)
+        self.assertIn('"persist_pose_graph", False', autonomous_source)
         self.assertIn('UInt16, "/battery"', autonomous_source)
         self.assertIn("saving partial map before low-battery shutdown", autonomous_source)
         self.assertIn(
@@ -292,13 +298,15 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("transform_publish_period: 0.05", params_text)
         self.assertIn("RewrittenYaml", launch_text)
         self.assertIn('"yaw_goal_tolerance": "3.14"', launch_text)
-        self.assertIn('"observation_sources": "scan"', launch_text)
+        self.assertNotIn('"observation_sources": "scan"', launch_text)
+        self.assertIn("camera-safety", compose_text)
         self.assertIn('default_value="false"', launch_text)
         self.assertIn("scan_topic: /scan_slam", params_text)
         self.assertIn("odom_frame: odom", params_text)
         self.assertIn("base_frame: base_footprint", params_text)
-        self.assertIn("observation_sources: scan camera", nav_params_text)
-        self.assertIn("topic: /camera_scan", nav_params_text)
+        self.assertIn("observation_sources: scan", nav_params_text)
+        self.assertNotIn("observation_sources: scan camera", nav_params_text)
+        self.assertNotIn("topic: /camera_scan", nav_params_text)
         self.assertIn("default_server_timeout: 1000", nav_params_text)
         self.assertIn("min_speed_theta: 0.0", nav_params_text)
         self.assertIn("required_movement_radius: 0.05", nav_params_text)
@@ -315,18 +323,27 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn('"/compute_path_to_pose"', source)
         self.assertIn("def _check_frontier_path", source)
         self.assertIn("frontier_inaccessible", source)
-        self.assertIn('"maximum_goal_step_distance", 0.75', source)
+        self.assertIn('"maximum_goal_step_distance", 1.00', source)
         self.assertIn('"goal_progress_timeout", 10.0', source)
-        self.assertIn('"stalled_goal_stage_blacklist_seconds", 8.0', source)
+        self.assertIn('"stalled_goal_stage_blacklist_seconds", 20.0', source)
         self.assertIn('"frontier_failures_before_cooldown", 3', source)
         self.assertIn('"failed_goal_blacklist_seconds", 20.0', source)
         self.assertIn('"reached_goal_blacklist_seconds", 1800.0', source)
-        self.assertIn('"staged_goal_blacklist_radius", 0.35', source)
-        self.assertIn('"preferred_path_obstacle_clearance", 0.40', source)
+        self.assertIn('"staged_goal_blacklist_radius", 0.20', source)
+        self.assertIn('"preferred_path_obstacle_clearance", 0.24', source)
         self.assertIn("minimum_path_obstacle_clearance=path_clearance", source)
         self.assertIn('self.path_priority = "wide"', source)
         self.assertIn('self.path_priority = "narrow_fallback"', source)
         self.assertIn("ClearEntireCostmap", source)
+        self.assertIn("BackUp, ComputePathToPose, NavigateToPose, Spin", source)
+        self.assertIn('ActionClient(self, BackUp, "/backup")', source)
+        self.assertIn('ActionClient(self, Spin, "/spin")', source)
+        self.assertIn('"escape_backup_distance", 0.10', source)
+        self.assertIn('"escape_turn_angle", 0.35', source)
+        self.assertIn("def _begin_escape_recovery", source)
+        self.assertIn("def _send_escape_spin", source)
+        self.assertIn("physical_recovery=True", source)
+        self.assertIn('"escape_recovery_stage": self.escape_stage', source)
         self.assertIn("active_reached_blacklist", source)
         self.assertIn("staged_blacklisted=[]", source)
         self.assertIn("Fresh Nav2 commands also renew it", source)
@@ -335,6 +352,20 @@ class NavigationRecoveryTests(unittest.TestCase):
             source.count("staged_blacklisted=active_staged_blacklist"), 3
         )
         self.assertGreaterEqual(source.count("blacklisted=active_blacklist"), 2)
+
+    def test_person_detection_sleeps_outside_follow_mode(self) -> None:
+        docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
+        detector_source = (docker_dir / "perception" / "detect.py").read_text()
+        mapping_source = (docker_dir / "autonomous_mapping.py").read_text()
+        bridge_source = (docker_dir / "robot_cmd_bridge.py").read_text()
+
+        self.assertIn("self.enabled = False", detector_source)
+        self.assertIn("if not self.enabled:", detector_source)
+        self.assertIn("self.enabled = True", detector_source)
+        self.assertIn("'/person_detection/pause'", detector_source)
+        self.assertIn('Trigger, "/person_detection/pause"', mapping_source)
+        self.assertIn("self._pause_person_detection()", mapping_source)
+        self.assertIn('Trigger, "/person_detection/pause"', bridge_source)
 
     def test_navigation_runtime_loads_saved_map_for_reboot(self) -> None:
         docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
@@ -396,6 +427,332 @@ class NavigationRecoveryTests(unittest.TestCase):
         self.assertIn("self._set_navigation_mode(True)", run_text)
         self.assertIn("self._set_navigation_mode(False)", run_text)
         self.assertIn("cancel_goal_async()", run_text)
+
+    def test_loadcell_status_is_relayed_alongside_safety_status(self) -> None:
+        docker_dir = Path(__file__).resolve().parents[2] / "robot_docker"
+        bridge_text = (docker_dir / "robot_cmd_bridge.py").read_text()
+        entrypoint_text = (docker_dir / "entrypoint.sh").read_text()
+        compose_text = (docker_dir / "compose.yaml").read_text()
+
+        # HANDOFF.md 6절 패턴 회귀 방지: loadcell 배선이 safety-status 작업에
+        # 밀려서 빠지지 않았는지 확인.
+        self.assertIn("/loadcell_guard/status", bridge_text)
+        self.assertIn('response["loadcell"]', bridge_text)
+        self.assertIn("loadcell)", entrypoint_text)
+        self.assertIn("loadcell:", compose_text)
+
+
+def load_autonomous_mapping_module():
+    rclpy = types.ModuleType("rclpy")
+    rclpy_node = types.ModuleType("rclpy.node")
+    rclpy_node.Node = FakeNode
+    rclpy_action = types.ModuleType("rclpy.action")
+    rclpy_action.ActionClient = type("ActionClient", (), {})
+    rclpy_duration = types.ModuleType("rclpy.duration")
+
+    class _Duration:
+        def __init__(self, seconds: float = 0.0) -> None:
+            self._seconds = seconds
+
+        def to_msg(self):
+            return types.SimpleNamespace(sec=int(self._seconds), nanosec=0)
+
+    rclpy_duration.Duration = _Duration
+    rclpy_qos = types.ModuleType("rclpy.qos")
+    rclpy_qos.DurabilityPolicy = types.SimpleNamespace(TRANSIENT_LOCAL=1)
+    rclpy_qos.ReliabilityPolicy = types.SimpleNamespace(RELIABLE=1)
+    rclpy_qos.QoSProfile = type("QoSProfile", (), {})
+    rclpy_time = types.ModuleType("rclpy.time")
+    rclpy_time.Time = type("Time", (), {})
+    action_msgs = types.ModuleType("action_msgs")
+    action_msgs_msg = types.ModuleType("action_msgs.msg")
+    action_msgs_msg.GoalStatus = types.SimpleNamespace(
+        STATUS_SUCCEEDED=4, STATUS_CANCELED=5
+    )
+    geometry_msgs = types.ModuleType("geometry_msgs")
+    geometry_msgs_msg = types.ModuleType("geometry_msgs.msg")
+    geometry_msgs_msg.PoseStamped = type("PoseStamped", (), {})
+    geometry_msgs_msg.Twist = type("Twist", (), {})
+    nav2_msgs = types.ModuleType("nav2_msgs")
+    nav2_msgs_action = types.ModuleType("nav2_msgs.action")
+    for name in ("ComputePathToPose", "NavigateToPose"):
+        setattr(nav2_msgs_action, name, type(name, (), {}))
+
+    class _BackUpGoal:
+        def __init__(self) -> None:
+            self.target = types.SimpleNamespace(x=0.0)
+            self.speed = 0.0
+            self.time_allowance = None
+
+    class _SpinGoal:
+        def __init__(self) -> None:
+            self.target_yaw = 0.0
+            self.time_allowance = None
+
+    nav2_msgs_action.BackUp = type("BackUp", (), {"Goal": _BackUpGoal})
+    nav2_msgs_action.Spin = type("Spin", (), {"Goal": _SpinGoal})
+    nav2_msgs_srv = types.ModuleType("nav2_msgs.srv")
+    nav2_msgs_srv.ClearEntireCostmap = type("ClearEntireCostmap", (), {})
+    nav2_msgs_srv.SaveMap = type("SaveMap", (), {})
+    nav_msgs = types.ModuleType("nav_msgs")
+    nav_msgs_msg = types.ModuleType("nav_msgs.msg")
+    nav_msgs_msg.OccupancyGrid = type("OccupancyGrid", (), {})
+    nav_msgs_srv = types.ModuleType("nav_msgs.srv")
+    nav_msgs_srv.GetMap = type("GetMap", (), {})
+    slam_toolbox = types.ModuleType("slam_toolbox")
+    slam_toolbox_srv = types.ModuleType("slam_toolbox.srv")
+    slam_toolbox_srv.DeserializePoseGraph = type("DeserializePoseGraph", (), {})
+    slam_toolbox_srv.SerializePoseGraph = type("SerializePoseGraph", (), {})
+    std_msgs = types.ModuleType("std_msgs")
+    std_msgs_msg = types.ModuleType("std_msgs.msg")
+    std_msgs_msg.Bool = type("Bool", (), {})
+    std_msgs_msg.String = type("String", (), {})
+    std_msgs_msg.UInt16 = type("UInt16", (), {})
+    std_srvs = types.ModuleType("std_srvs")
+    std_srvs_srv = types.ModuleType("std_srvs.srv")
+    std_srvs_srv.Trigger = type("Trigger", (), {})
+    tf2_ros = types.ModuleType("tf2_ros")
+    tf2_ros.Buffer = type("Buffer", (), {})
+    tf2_ros.TransformException = type("TransformException", (Exception,), {})
+    tf2_ros.TransformListener = type("TransformListener", (), {})
+    stubs = {
+        "rclpy": rclpy,
+        "rclpy.node": rclpy_node,
+        "rclpy.action": rclpy_action,
+        "rclpy.duration": rclpy_duration,
+        "rclpy.qos": rclpy_qos,
+        "rclpy.time": rclpy_time,
+        "action_msgs": action_msgs,
+        "action_msgs.msg": action_msgs_msg,
+        "geometry_msgs": geometry_msgs,
+        "geometry_msgs.msg": geometry_msgs_msg,
+        "nav2_msgs": nav2_msgs,
+        "nav2_msgs.action": nav2_msgs_action,
+        "nav2_msgs.srv": nav2_msgs_srv,
+        "nav_msgs": nav_msgs,
+        "nav_msgs.msg": nav_msgs_msg,
+        "nav_msgs.srv": nav_msgs_srv,
+        "slam_toolbox": slam_toolbox,
+        "slam_toolbox.srv": slam_toolbox_srv,
+        "std_msgs": std_msgs,
+        "std_msgs.msg": std_msgs_msg,
+        "std_srvs": std_srvs,
+        "std_srvs.srv": std_srvs_srv,
+        "tf2_ros": tf2_ros,
+    }
+    path = Path(__file__).resolve().parents[2] / "robot_docker" / "autonomous_mapping.py"
+    spec = importlib.util.spec_from_file_location("autonomous_mapping_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses (FrontierFailureRecord etc.) resolve their `from __future__
+    # import annotations` string annotations via sys.modules[cls.__module__],
+    # so the module must be registered under its own name before exec runs.
+    stubs["autonomous_mapping_under_test"] = module
+    sys.path.insert(0, str(path.parent))
+    try:
+        with patch.dict(sys.modules, stubs):
+            spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module
+
+
+class SafetyStatusMessage:
+    def __init__(self, payload: dict) -> None:
+        self.data = json.dumps(payload)
+
+
+class AutonomousMappingSafetyStatusTests(unittest.TestCase):
+    """Covers the state machine backing the "explicit safety block persists
+    for 3s -> cancel the frontier goal instead of waiting out the normal 15s
+    progress timeout" behaviour, plus the two invariants the handoff notes
+    called out as unverified: a single init in __init__, and a reset on both
+    the new-mapping-start and natural-completion paths."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_autonomous_mapping_module()
+
+    def make_node(self, *, now: float = 1_000.0):
+        node = object.__new__(self.module.AutonomousMappingNode)
+        node.latest_safety_status = {}
+        node.last_safety_status_at = 0.0
+        node.safety_blocked_since = 0.0
+        node._clock = [now]
+        node._seconds = lambda: node._clock[0]
+        node._parameters = {"maximum_safety_status_age": 1.5}
+        node.get_parameter = lambda name: types.SimpleNamespace(
+            value=node._parameters[name]
+        )
+        return node
+
+    def send_status(self, node, **overrides):
+        payload = {
+            "navigation_mode": True,
+            "reason": "camera_front",
+            "requested_linear": 0.1,
+            "requested_angular": 0.0,
+            "output_linear": 0.0,
+            "output_angular": 0.0,
+        }
+        payload.update(overrides)
+        node._on_safety_status(SafetyStatusMessage(payload))
+
+    def test_central_camera_block_starts_and_extends_the_blocked_timer(self) -> None:
+        node = self.make_node(now=1_000.0)
+
+        self.send_status(node)
+
+        self.assertEqual(node.safety_blocked_since, 1_000.0)
+        block = node._active_safety_block(1_000.0)
+        self.assertIsNotNone(block)
+        self.assertEqual(block[0], "camera_front")
+
+    def test_side_obstacle_reason_does_not_start_a_blocked_timer(self) -> None:
+        # A side-camera obstacle never reaches the bridge's blocking branch,
+        # so it is published as "clear" with the requested motion passing
+        # through -- output_linear stays equal to requested_linear.
+        node = self.make_node(now=1_000.0)
+
+        self.send_status(
+            node, reason="clear", requested_linear=0.1, output_linear=0.1
+        )
+
+        self.assertEqual(node.safety_blocked_since, 0.0)
+        self.assertIsNone(node._active_safety_block(1_000.0))
+
+    def test_pure_rotation_does_not_start_a_blocked_timer(self) -> None:
+        # A pure rotation request (no linear component) is never classified
+        # as blocked even if the bridge reports a critical camera reading.
+        node = self.make_node(now=1_000.0)
+
+        self.send_status(
+            node,
+            reason="camera_critical",
+            requested_linear=0.0,
+            requested_angular=0.18,
+            output_linear=0.0,
+            output_angular=0.18,
+        )
+
+        self.assertEqual(node.safety_blocked_since, 0.0)
+        self.assertIsNone(node._active_safety_block(1_000.0))
+
+    def test_block_duration_reaches_the_three_second_cancel_threshold(self) -> None:
+        # The bridge republishes /cmd_bridge/safety_status every 0.5s, so a
+        # sustained block looks like repeated same-reason messages that keep
+        # last_safety_status_at fresh while safety_blocked_since stays
+        # anchored at the first occurrence.
+        node = self.make_node(now=1_000.0)
+        for offset in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+            node._clock[0] = 1_000.0 + offset
+            self.send_status(node)
+
+        block = node._active_safety_block(1_003.0)
+
+        self.assertIsNotNone(block)
+        reason, duration = block
+        self.assertEqual(reason, "camera_front")
+        safety_timeout = 3.0
+        self.assertGreaterEqual(duration, safety_timeout)
+
+    def test_stale_safety_status_is_ignored(self) -> None:
+        node = self.make_node(now=1_000.0)
+        self.send_status(node)
+
+        # No further status arrives; maximum_safety_status_age is 1.5s.
+        block = node._active_safety_block(1_000.0 + 1.6)
+
+        self.assertIsNone(block)
+
+    def test_safety_blocked_since_is_initialized_exactly_once(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "robot_docker"
+            / "autonomous_mapping.py"
+        ).read_text()
+        init_body = source.split("def __init__", 1)[1].split("\n    def ", 1)[0]
+
+        self.assertEqual(init_body.count("self.safety_blocked_since = 0.0"), 1)
+
+    def test_safety_blocked_since_resets_on_new_mapping_start(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "robot_docker"
+            / "autonomous_mapping.py"
+        ).read_text()
+        start_body = source.split("def _start(", 1)[1].split("\n    def ", 1)[0]
+
+        self.assertIn("self.safety_blocked_since = 0.0", start_body)
+
+    def test_safety_blocked_since_resets_on_natural_completion(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "robot_docker"
+            / "autonomous_mapping.py"
+        ).read_text()
+        completion_marker = 'self.state = "completed"'
+        index = source.index(completion_marker)
+        following = source[index : index + 400]
+
+        self.assertIn("self.safety_blocked_since = 0.0", following)
+
+
+class EscapeRecoveryRoutingTests(unittest.TestCase):
+    """camera_critical blocks translation in every direction, so a backup
+    attempt under it is doomed before it starts -- it should be skipped in
+    favour of going straight to the turn, not spend a full
+    escape_action_timeout finding that out the slow way."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_autonomous_mapping_module()
+
+    def make_node(self, *, reason: str):
+        node = object.__new__(self.module.AutonomousMappingNode)
+        node.backup_recovery = MagicMock()
+        node.backup_recovery.server_is_ready.return_value = True
+        node.spin_recovery = MagicMock()
+        node.spin_recovery.server_is_ready.return_value = True
+        node.escape_generation = 0
+        node.escape_handle = None
+        node.escape_started_at = 0.0
+        node.escape_message = ""
+        node.escape_recovery_summary = ""
+        node.latest_safety_status = {"reason": reason}
+        node._seconds = lambda: 1000.0
+        node._send_escape_spin = MagicMock()
+        return node
+
+    def test_camera_critical_block_skips_straight_to_the_turn(self) -> None:
+        node = self.make_node(reason="camera_critical")
+
+        started = node._begin_escape_recovery("frontier motion blocked", None)
+
+        self.assertTrue(started)
+        node.backup_recovery.send_goal_async.assert_not_called()
+        node._send_escape_spin.assert_called_once_with(
+            node.escape_generation, backup_succeeded=False
+        )
+
+    def test_other_block_reasons_still_attempt_backup_first(self) -> None:
+        node = self.make_node(reason="lidar_front")
+        node.get_parameter = lambda name: types.SimpleNamespace(
+            value={
+                "escape_backup_distance": 0.10,
+                "escape_backup_speed": 0.06,
+                "escape_action_timeout": 6.0,
+            }[name]
+        )
+        node._publish_status = MagicMock()
+        future = MagicMock()
+        node.backup_recovery.send_goal_async.return_value = future
+
+        started = node._begin_escape_recovery("frontier motion blocked", None)
+
+        self.assertTrue(started)
+        node.backup_recovery.send_goal_async.assert_called_once()
+        node._send_escape_spin.assert_not_called()
 
 
 if __name__ == "__main__":

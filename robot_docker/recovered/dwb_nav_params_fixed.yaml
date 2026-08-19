@@ -215,13 +215,17 @@ local_costmap:
       rolling_window: true
       width: 3
       height: 3
-      resolution: 0.05
+      # Matches slam_toolbox's raised resolution (see mapping_slam_params.yaml)
+      # to keep the static layer resample-free and cut local costmap cost.
+      resolution: 0.075
       robot_radius: 0.22
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.35
+        # Keep the measured 0.22 m footprint lethal while allowing Nav2 to
+        # traverse the center of the classroom's 0.50 m desk aisles.
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.28
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -231,7 +235,20 @@ local_costmap:
         z_voxels: 16
         max_obstacle_height: 2.0
         mark_threshold: 0
-        observation_sources: scan camera
+        # camera used to be fused in here as a second observation_source,
+        # equally weighted with LiDAR (mark_threshold: 0 means either alone
+        # marks a lethal, inflated cell). Monocular detection cannot yet
+        # reliably tell a real desk/chair leg from a reflection or shadow at
+        # this exact range (see camera_obstacle_guard.py's accepted-narrow-
+        # achromatic case) and a single false marking here blocked both the
+        # global planner (GridBased repeatedly failed to route around it)
+        # and Nav2's own spin recovery ("Collision Ahead - Exiting Spin"),
+        # even after camera_scan was gone from view (2026-08-19). LiDAR
+        # alone drives planning and recovery again; camera obstacle
+        # avoidance still runs, but only as robot_cmd_bridge's reactive
+        # front-cone stop/creep on the live motor command, not as a costmap
+        # obstacle that can veto an entire plan or maneuver up front.
+        observation_sources: scan
         scan:
           topic: /scan_fixed
           max_obstacle_height: 2.0
@@ -242,19 +259,6 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
-        # Monocular ranges are approximate, so camera observations live only
-        # in this rolling costmap and never become persistent map obstacles.
-        camera:
-          topic: /camera_scan
-          max_obstacle_height: 2.0
-          clearing: True
-          marking: True
-          data_type: "LaserScan"
-          inf_is_valid: True
-          raytrace_max_range: 2.0
-          raytrace_min_range: 0.22
-          obstacle_max_range: 1.9
-          obstacle_min_range: 0.22
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -269,7 +273,8 @@ global_costmap:
       robot_base_frame: base_link
       use_sim_time: False
       robot_radius: 0.22
-      resolution: 0.05
+      # Matches slam_toolbox's raised resolution -- see mapping_slam_params.yaml.
+      resolution: 0.075
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
@@ -291,8 +296,8 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.35
+        cost_scaling_factor: 6.0
+        inflation_radius: 0.28
       always_send_full_costmap: True
 
 map_server:

@@ -39,6 +39,16 @@ case "${1:-}" in
             --ros-args \
             -p camera_url:="${ROBOT_CAMERA_URL:-http://127.0.0.1:8080/stream.mjpg}"
         ;;
+    loadcell)
+        exec python3 /opt/robot-control/navigation/loadcell_guard.py \
+            --ros-args \
+            -p dt_pin:="${ROBOT_LOADCELL_DT_PIN:-5}" \
+            -p sck_pin:="${ROBOT_LOADCELL_SCK_PIN:-6}" \
+            -p tare_offset:="${ROBOT_LOADCELL_TARE_OFFSET:-0}" \
+            -p grams_per_count:="${ROBOT_LOADCELL_GRAMS_PER_COUNT:-0.0}" \
+            -p low_threshold_g:="${ROBOT_LOADCELL_LOW_THRESHOLD_G:-0.0}" \
+            -p high_threshold_g:="${ROBOT_LOADCELL_HIGH_THRESHOLD_G:-100000.0}"
+        ;;
     person-detect)
         exec python3 /opt/robot-control/perception/detect.py \
             --ros-args \
@@ -98,7 +108,7 @@ case "${1:-}" in
             params_file:="${runtime_params}"
         ;;
     *)
-        echo "usage: entrypoint.sh {bringup|base|bridge|camera|camera-safety|person-detect|follow|mapping|mapping-server|map-postprocessor|navigation}" >&2
+        echo "usage: entrypoint.sh {bringup|base|bridge|camera|camera-safety|loadcell|person-detect|follow|mapping|mapping-server|map-postprocessor|navigation}" >&2
         exit 2
         ;;
 esac

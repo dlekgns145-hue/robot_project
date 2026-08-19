@@ -34,6 +34,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
+from std_srvs.srv import Trigger
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
@@ -96,6 +97,10 @@ class YoloDetectNode(Node):
 
         self.sub = self.create_subscription(Image, camera_topic, self.image_callback, 10)
         self.pub = self.create_publisher(Float32MultiArray, '/person_detection', 10)
+        # Loading the model is cheap compared with running inference on every
+        # frame. Keep inference asleep until follow mode explicitly resets a
+        # target, and let mapping pause it without stopping the container.
+        self.enabled = False
 
         # ---- 타겟(따라갈 사람) 상태 ----
         self.target_id = None          # BoT-SORT가 부여한 track id
@@ -104,7 +109,37 @@ class YoloDetectNode(Node):
         self.pending_switch_count = 0
         self.known_other_ids = set()   # 타겟과 동시에 잡혀서 "확실히 타겟이 아님"이 확정된 track id들
 
+        # "따라와" 트리거가 들어올 때마다 호출됨 -- 타겟 상태를 초기화해서 다음 프레임에
+        # 카메라에서 제일 가까운 사람을 새 타겟으로 다시 잡게 한다 (말한 사람 = 제일 가까운
+        # 사람이라고 가정. 마이크 방향으로 화자를 특정하는 기능은 없음).
+        self.create_service(Trigger, '/person_detection/reset_target', self._handle_reset_target)
+        self.create_service(Trigger, '/person_detection/pause', self._handle_pause)
+
         self.get_logger().info(f'YOLO Detect Node 시작됨 (camera_topic={camera_topic})')
+
+    def _handle_reset_target(self, request, response):
+        self.enabled = True
+        self.target_id = None
+        self.target_features = None
+        self.pending_switch_id = None
+        self.pending_switch_count = 0
+        self.known_other_ids = set()
+        self.get_logger().info('타겟 리셋됨 -- 다음 프레임에서 가장 가까운 사람을 새로 잡음')
+        response.success = True
+        response.message = 'target reset'
+        return response
+
+    def _handle_pause(self, request, response):
+        self.enabled = False
+        self.target_id = None
+        self.target_features = None
+        self.pending_switch_id = None
+        self.pending_switch_count = 0
+        self.known_other_ids = set()
+        self.get_logger().info('사람 인식 일시정지 -- 매핑/유휴 CPU 확보')
+        response.success = True
+        response.message = 'person detection paused'
+        return response
 
     @staticmethod
     def _load_face_models(detector_path, recognizer_path):
@@ -116,6 +151,8 @@ class YoloDetectNode(Node):
         return detector, recognizer
 
     def image_callback(self, msg: Image):
+        if not self.enabled:
+            return
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         h, w, _ = frame.shape
 

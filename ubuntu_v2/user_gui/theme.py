@@ -2,12 +2,12 @@
 
 USER_STYLESHEET = r"""
 QWidget#AppRoot {
-    background: #f3f7fb;
-    color: #152033;
+    background: #f4f9ee;
+    color: #1c2b16;
 }
 
 QWidget {
-    color: #20304a;
+    color: #263a1e;
     font-family: "Pretendard", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
     font-size: 14px;
 }
@@ -16,19 +16,19 @@ QFrame#Header,
 QFrame#CameraCard,
 QFrame#StatusCard {
     background: #ffffff;
-    border: 1px solid #dbe5ef;
+    border: 1px solid #dce8cc;
     border-radius: 18px;
 }
 
 QLabel#Eyebrow {
-    color: #2777df;
+    color: #558b2f;
     font-size: 11px;
     font-weight: 800;
     letter-spacing: 1px;
 }
 
 QLabel#Title {
-    color: #14213a;
+    color: #1b2c14;
     font-size: 27px;
     font-weight: 800;
 }
@@ -36,7 +36,7 @@ QLabel#Title {
 QLabel#Subtitle,
 QLabel#Hint,
 QLabel#StatusCaption {
-    color: #718096;
+    color: #77896d;
     font-size: 12px;
 }
 
@@ -61,9 +61,9 @@ QLabel#ConnectionStatus[state="waiting"] {
 }
 
 QLabel#ConnectionStatus[state="online"] {
-    color: #127159;
-    background: #eafaf5;
-    border: 1px solid #bde9dc;
+    color: #4c7a25;
+    background: #eef7e0;
+    border: 1px solid #cde3b3;
 }
 
 QLabel#VideoSurface {
@@ -75,26 +75,26 @@ QLabel#VideoSurface {
 }
 
 QLabel#CameraMetrics {
-    color: #52657a;
-    background: #edf4fb;
+    color: #587147;
+    background: #eef5e2;
     border-radius: 10px;
     padding: 5px 10px;
     font-size: 11px;
 }
 
 QLabel#StatusValue {
-    color: #16253e;
+    color: #1c2c15;
     font-size: 15px;
     font-weight: 750;
 }
 
 QGroupBox {
     background: #ffffff;
-    border: 1px solid #dbe5ef;
+    border: 1px solid #dce8cc;
     border-radius: 16px;
     margin-top: 14px;
     padding: 18px 14px 14px 14px;
-    color: #192942;
+    color: #21331a;
     font-size: 14px;
     font-weight: 750;
 }
@@ -112,82 +112,82 @@ QSpinBox,
 QComboBox {
     min-height: 38px;
     padding: 0 11px;
-    color: #20304a;
-    background: #f8fafc;
-    border: 1px solid #cfdbe7;
+    color: #263a1e;
+    background: #f8faf3;
+    border: 1px solid #d3e0c0;
     border-radius: 9px;
 }
 
 QLineEdit:focus,
 QSpinBox:focus,
 QComboBox:focus {
-    border: 1px solid #3688ef;
+    border: 1px solid #7cb342;
     background: #ffffff;
 }
 
 QLineEdit:disabled,
 QSpinBox:disabled,
 QComboBox:disabled {
-    color: #9aa8b8;
-    background: #eef2f6;
+    color: #a3ad98;
+    background: #eef2e8;
 }
 
 QPushButton {
     min-height: 40px;
     padding: 0 15px;
-    color: #243650;
-    background: #edf3f9;
-    border: 1px solid #d1dce7;
+    color: #2d4023;
+    background: #eff5e6;
+    border: 1px solid #d6e2c4;
     border-radius: 10px;
     font-weight: 700;
 }
 
 QPushButton:hover {
-    background: #e2edf8;
-    border-color: #aebfd0;
+    background: #e6f0d8;
+    border-color: #b2c79a;
 }
 
 QPushButton:pressed,
 QPushButton:checked {
-    background: #cfe4fa;
-    border-color: #5b9de5;
+    background: #cfe6ab;
+    border-color: #7cb342;
 }
 
 QPushButton:disabled {
-    color: #a3afbd;
-    background: #f1f4f7;
-    border-color: #e2e8ef;
+    color: #a7b19c;
+    background: #f2f5ee;
+    border-color: #e4ead9;
 }
 
 QPushButton[role="primary"] {
     color: #ffffff;
-    background: #2678df;
-    border-color: #2678df;
+    background: #689f38;
+    border-color: #689f38;
 }
 
 QPushButton[role="primary"]:hover {
-    background: #1d69c7;
+    background: #558b2f;
 }
 
 QPushButton[role="primary"]:checked {
     color: #ffffff;
-    background: #1559ad;
-    border-color: #1559ad;
+    background: #33691e;
+    border-color: #33691e;
 }
 
 QPushButton[role="drive"] {
     min-width: 82px;
     min-height: 64px;
-    color: #27405d;
-    background: #f1f6fb;
-    border-color: #cbd9e7;
+    color: #33472a;
+    background: #f2f7e9;
+    border-color: #cddbb5;
     font-size: 13px;
 }
 
 QPushButton[role="drive"]:pressed {
     color: #ffffff;
-    background: #2777df;
-    border-color: #2777df;
+    background: #689f38;
+    border-color: #689f38;
 }
 
 QPushButton[role="stop"] {
@@ -229,7 +229,7 @@ QScrollBar:vertical {
 
 QScrollBar::handle:vertical {
     min-height: 28px;
-    background: #bcc9d6;
+    background: #b7c99f;
     border-radius: 4px;
 }
 
