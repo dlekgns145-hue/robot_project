@@ -1,0 +1,44 @@
+FROM debian:bookworm-slim AS whisper-builder
+
+ARG WHISPER_CPP_VERSION=v1.9.1
+
+RUN apt-get -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
+       ca-certificates cmake g++ git make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${WHISPER_CPP_VERSION}" \
+      https://github.com/ggml-org/whisper.cpp.git \
+    && cmake -S whisper.cpp -B whisper.cpp/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_NATIVE=OFF \
+      -DGGML_CPU_ARM_ARCH=armv8-a \
+      -DWHISPER_BUILD_TESTS=OFF \
+      -DWHISPER_BUILD_EXAMPLES=ON \
+    && cmake --build whisper.cpp/build --config Release \
+      --target whisper-cli whisper-server -j 2
+
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    WHISPER_CLI=/usr/local/bin/whisper-cli \
+    WHISPER_MODEL=/models/ggml-small.bin
+
+RUN apt-get -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends \
+       ca-certificates curl ffmpeg libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=whisper-builder /src/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
+COPY --from=whisper-builder /src/whisper.cpp/build/bin/whisper-server /usr/local/bin/whisper-server
+COPY robot_app/voice_command_server.py /opt/robot-control-v2/robot_app/voice_command_server.py
+COPY docker/voice-entrypoint.sh /usr/local/bin/voice-entrypoint
+
+RUN chmod 0755 /usr/local/bin/voice-entrypoint \
+    && mkdir -p /models
+
+EXPOSE 10000
+ENTRYPOINT ["/usr/local/bin/voice-entrypoint"]

@@ -94,6 +94,10 @@ class GatewayProtocolTests(unittest.TestCase):
             {"type": "navigation_cancel"},
         )
         self.assertEqual(legacy_payload({"type": "map_request"}), {"type": "map_request"})
+        for command_type in ("navigate_home", "home_set", "soft_pause"):
+            self.assertEqual(
+                legacy_payload({"type": command_type}), {"type": command_type}
+            )
 
     def test_mapping_commands_are_forwarded(self) -> None:
         for command_type in (
@@ -301,6 +305,44 @@ class GatewayProtocolTests(unittest.TestCase):
         self.assertIsNone(status["discovery_method"])
         self.assertEqual(status["last_robot_ip"], "172.30.1.18")
         self.assertEqual(status["last_discovery_method"], "mac-neighbor")
+
+    def test_status_relays_loadcell_snapshot_from_robot(self) -> None:
+        relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+        relay.connection = object()  # type: ignore[assignment]
+        relay._robot_response = {
+            "loadcell": {
+                "connected": True,
+                "source": "arduino_usb",
+                "grams": 2.4,
+                "state": "above",
+            }
+        }
+
+        status = relay.status(sent=True)
+
+        self.assertEqual(status["loadcell"]["source"], "arduino_usb")
+        self.assertEqual(status["loadcell"]["grams"], 2.4)
+        self.assertEqual(status["loadcell"]["state"], "above")
+
+    def test_status_relays_apple_detection_snapshot_from_robot(self) -> None:
+        relay = RobotRelay(RobotLocator(robot_ip="127.0.0.1"))
+        relay.connection = object()  # type: ignore[assignment]
+        relay._robot_response = {
+            "apple_detection": {
+                "connected": True,
+                "model_ready": True,
+                "state": "damaged",
+                "healthy_count": 1,
+                "damaged_count": 2,
+                "inference_ms": 86.4,
+            }
+        }
+
+        status = relay.status(sent=True)
+
+        self.assertTrue(status["apple_detection"]["model_ready"])
+        self.assertEqual(status["apple_detection"]["state"], "damaged")
+        self.assertEqual(status["apple_detection"]["damaged_count"], 2)
 
     def test_rejected_command_does_not_close_connection(self) -> None:
         class MockConnection:

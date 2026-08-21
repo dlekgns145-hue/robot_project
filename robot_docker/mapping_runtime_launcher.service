@@ -1,0 +1,16 @@
+[Unit]
+Description=mapping-runtime launcher (narrow docker-compose trigger for robot_cmd_bridge)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=pi
+Environment=ROBOT_DEPLOY_DIR=/home/pi/robot-control-deploy
+Environment=MAPPING_LAUNCHER_SOCKET=/home/pi/robot-control-deploy/mapping_launcher.sock
+ExecStart=/usr/bin/python3 /home/pi/robot-control-deploy/mapping_runtime_launcher.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

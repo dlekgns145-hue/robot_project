@@ -171,7 +171,8 @@ cp -a \
     "${SOURCE_DIR}/robot_docker/recovered/Broom.pgm" \
     "${SOURCE_DIR}/robot_docker/recovered/dwb_nav_params_fixed.yaml" \
     "${INSTALL_DIR}/robot_docker/recovered/"
-install -d "${INSTALL_DIR}/ubuntu_v2/data" "${INSTALL_DIR}/ubuntu_v2/maps"
+install -d "${INSTALL_DIR}/ubuntu_v2/data" "${INSTALL_DIR}/ubuntu_v2/maps" \
+    "${INSTALL_DIR}/ubuntu_v2/models"
 
 ENV_FILE="${INSTALL_DIR}/ubuntu_v2/.env"
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -227,7 +228,7 @@ fi
 cd "${INSTALL_DIR}/ubuntu_v2"
 docker compose --profile compute config >/dev/null
 if [[ "${HAS_BUNDLED_IMAGES}" != "true" ]]; then
-    docker compose --profile compute build gateway map-postprocessor
+    docker compose --profile compute build gateway map-postprocessor voice-command
 fi
 
 install -m 0644 \
@@ -239,12 +240,14 @@ systemctl restart robot-control-server.service
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 9999/tcp
+    ufw allow 10000/tcp
 fi
 
 SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo
 echo "Robot compute server installation complete."
 echo "  Server address: ${SERVER_IP:-<Ubuntu-IP>}:9999"
+echo "  Voice address:  ${SERVER_IP:-<Ubuntu-IP>}:10000"
 echo "  Robot address:  ${ROBOT_IP}"
 echo "  Service:        robot-control-server.service"
 echo "  Maps:           ${INSTALL_DIR}/ubuntu_v2/maps"

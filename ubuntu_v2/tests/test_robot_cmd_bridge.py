@@ -84,6 +84,7 @@ def load_bridge_module():
     std_msgs = types.ModuleType("std_msgs")
     std_msgs_msg = types.ModuleType("std_msgs.msg")
     std_msgs_msg.Bool = type("Bool", (), {})
+    std_msgs_msg.Float32 = type("Float32", (), {})
     std_msgs_msg.Int32 = type("Int32", (), {})
     std_msgs_msg.String = String
     std_srvs = types.ModuleType("std_srvs")
@@ -132,6 +133,7 @@ class CommandLeaseTests(unittest.TestCase):
         node.last_cmd_time = 0.0
         node._timeout_stop_published = False
         node.navigation_mode = False
+        node.follow_enabled = False
         node.avoid_state = "NORMAL"
         node.pub = RecordingPublisher()
         node.server_linear = 0.0
@@ -546,6 +548,44 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertTrue(response["navigation"]["active"])
 
+    def test_navigate_home_uses_map_bound_saved_pose(self) -> None:
+        homes = []
+        node = types.SimpleNamespace(
+            navigate_home=lambda: homes.append(True)
+            or {"x": 1.0, "y": -2.0, "yaw": 0.5, "map_sha256": "a" * 64},
+            navigation_snapshot=lambda: {"state": "sending", "active": True},
+        )
+
+        response = self.bridge.handle_socket_command(node, {"type": "navigate_home"})
+
+        self.assertEqual(homes, [True])
+        self.assertEqual(response["home"]["x"], 1.0)
+        self.assertTrue(response["navigation"]["active"])
+
+    def test_soft_pause_never_starts_a_goal(self) -> None:
+        pauses = []
+        node = types.SimpleNamespace(
+            soft_pause=lambda: pauses.append(True) or "robot paused",
+            navigation_snapshot=lambda: {"state": "canceled", "active": False},
+        )
+
+        response = self.bridge.handle_socket_command(node, {"type": "soft_pause"})
+
+        self.assertEqual(pauses, [True])
+        self.assertEqual(response["command_result"]["type"], "soft_pause")
+        self.assertFalse(response["navigation"]["active"])
+
+    def test_home_pose_must_match_active_map(self) -> None:
+        pose = {"x": 1.0, "y": 2.0, "yaw": 7.0, "map_sha256": "a" * 64}
+
+        validated = self.bridge.validated_home_pose(pose, "a" * 64)
+
+        self.assertAlmostEqual(validated["x"], 1.0)
+        self.assertGreaterEqual(validated["yaw"], -self.bridge.math.pi)
+        self.assertLessEqual(validated["yaw"], self.bridge.math.pi)
+        with self.assertRaisesRegex(ValueError, "different map"):
+            self.bridge.validated_home_pose(pose, "b" * 64)
+
     def test_mapping_command_and_status_are_returned(self) -> None:
         commands = []
         node = types.SimpleNamespace(
@@ -561,6 +601,25 @@ class CommandLeaseTests(unittest.TestCase):
         self.assertEqual(commands, ["mapping_start"])
         self.assertTrue(response["command_result"]["ok"])
         self.assertTrue(response["mapping"]["enabled"])
+
+    def test_apple_detection_status_is_returned(self) -> None:
+        node = types.SimpleNamespace(
+            navigation_snapshot=lambda: {"state": "idle", "active": False},
+            apple_detection_snapshot=lambda: {
+                "connected": True,
+                "model_ready": True,
+                "state": "healthy",
+                "healthy_count": 1,
+                "damaged_count": 0,
+            },
+        )
+
+        response = self.bridge.handle_socket_command(
+            node, {"heartbeat": True, "linear": 0.0, "angular": 0.0}
+        )
+
+        self.assertEqual(response["apple_detection"]["state"], "healthy")
+        self.assertEqual(response["apple_detection"]["healthy_count"], 1)
 
     def test_map_payload_ignores_visual_layer_files(self) -> None:
         node = object.__new__(self.bridge.CmdBridgeNode)

@@ -36,6 +36,7 @@ cp -a \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/map_inbox.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/map_postprocess.py" \
     "${PROJECT_DIR}/ubuntu_v2/robot_app/robot_gateway.py" \
+    "${PROJECT_DIR}/ubuntu_v2/robot_app/voice_command_server.py" \
     "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/robot_app/"
 cp -a \
     "${PROJECT_DIR}/ubuntu_v2/scripts/run_compute_mapping.sh" \
@@ -75,7 +76,12 @@ cp -a \
     "${PROJECT_DIR}/robot_docker/recovered/dwb_nav_params_fixed.yaml" \
     "${STAGING_DIR}/${IMAGE_NAME}/robot_docker/recovered/"
 install -d "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/data" \
-    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/maps"
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/maps" \
+    "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/models"
+if [[ -f "${PROJECT_DIR}/ubuntu_v2/models/ggml-large-v3-turbo-q5_0.bin" ]]; then
+    cp -a "${PROJECT_DIR}/ubuntu_v2/models/ggml-large-v3-turbo-q5_0.bin" \
+        "${STAGING_DIR}/${IMAGE_NAME}/ubuntu_v2/models/"
+fi
 if [[ -f "${PROJECT_DIR}/images/robot-control-server-images.tar" ]]; then
     install -d "${STAGING_DIR}/${IMAGE_NAME}/images"
     cp -a "${PROJECT_DIR}/images/robot-control-server-images.tar" \

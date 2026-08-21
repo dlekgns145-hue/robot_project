@@ -6,8 +6,12 @@ YOLO 기반 사람 인식 노드 (detect.py) - 확정 버전
 탐지 결과(중심좌표, 박스 크기)를 /person_detection 토픽으로 발행한다.
 
 타겟(따라갈 사람) 선정 방식:
+  0. 화면에 사람이 딱 한 명뿐이면 헷갈릴 대상이 아예 없으므로 얼굴/외형/옷색깔
+     매칭(아래 2번)을 전부 건너뛰고 그 사람을 곧바로 타겟으로 삼는다. YOLO+트래킹은
+     인원수를 알아야 하니 어차피 매 프레임 돌지만, 무거운 나머지 단계는 실제로
+     구분이 필요한 상황(사람이 2명 이상 잡힘)에서만 켠다.
   1. 처음엔 화면에서 가장 가까운(박스가 가장 큰) 사람을 타겟으로 지정한다.
-  2. 이후엔 매 프레임마다 화면에 보이는 모든 사람에게 가중치 점수를 매긴다 (트랙 ID는
+  2. 사람이 2명 이상 잡히면 매 프레임마다 화면에 보이는 모든 사람에게 가중치 점수를 매긴다 (트랙 ID는
      신뢰하지 않는다 - BoT-SORT가 겹침/교차 상황에서 ID를 엉뚱한 사람에게 붙이는 경우가
      있어서, ID가 같다고 가산점을 주면 그 오류를 오히려 못 잡아낸다):
        - 얼굴 점수: OpenCV YuNet(검출)+SFace(인식) 얼굴 임베딩 코사인 유사도
@@ -174,25 +178,72 @@ class YoloDetectNode(Node):
             cv2.waitKey(1)
 
     def run_inference(self, frame):
+        # The camera's native frame is 320x240. Without an explicit imgsz,
+        # ultralytics defaults to 640 and upscales into it before every
+        # inference -- pure waste, since upscaling a 320-wide source can't
+        # add real detail, and it was costing ~3x the compute for it
+        # (profiled on the real robot, 2026-08-20: 762ms/frame at the
+        # default 640 vs 253ms/frame at 320, same detections). This was the
+        # dominant cost in the whole pipeline by a wide margin -- face
+        # detection/recognition and the clothing histogram are single-digit
+        # to low-double-digit ms by comparison.
         results = self.model.track(
-            frame, persist=True, classes=[0], tracker=self.tracker_config, verbose=False,
+            frame, persist=True, classes=[0], tracker=self.tracker_config,
+            verbose=False, imgsz=320,
         )[0]
+
+        # 얼굴/외형/옷색깔 추출은 뒤에서 실제로 필요할 때만 한다 (아래 1명 케이스
+        # 참고) -- 박스 좌표와 track_id만 먼저 뽑아둔다.
+        boxes = []
+        for unconfirmed_index, box in enumerate(results.boxes):
+            if box.id is None:
+                # BoT-SORT hasn't confirmed a persistent track yet -- expected
+                # on a fresh track, and near-constant when frame processing is
+                # slow (CPU-bound YOLO+ReID+face-rec on a Pi, ~1 fps observed)
+                # since large motion between processed frames keeps breaking
+                # track association before it confirms. Don't drop the
+                # detection: identity re-check is purely appearance-based, not
+                # track ID (see _select_target's docstring), so an
+                # unstable/placeholder ID here doesn't weaken identity
+                # tracking -- it only used to block otherwise-good detections
+                # outright (found on the real robot, 2026-08-20: a
+                # clearly-visible person never registered because box.id was
+                # never confirmed).
+                track_id = -1 - unconfirmed_index
+            else:
+                track_id = int(box.id[0])
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            boxes.append((track_id, x1, y1, x2, y2))
+
+        if not boxes:
+            return 0, 0, 0, 0, 0
+
+        if len(boxes) == 1:
+            # 화면에 사람이 딱 한 명뿐이면 헷갈릴 상대가 없으므로 얼굴 검출/인식,
+            # ReID, 옷 색깔 히스토그램을 전부 건너뛰고 곧바로 그 사람을 타겟으로
+            # 삼는다 -- 이게 파이프라인에서 YOLO 다음으로 무거운 부분들이라, 흔한
+            # "사람 한 명" 상황에서 매 프레임 CPU를 크게 아낀다. target_features/
+            # known_other_ids는 그대로 남겨둬서, 나중에 2번째 사람이 나타나
+            # 특정인물 로직이 다시 켜질 때 마지막으로 확인된 외형 정보를 바로
+            # 쓸 수 있게 한다.
+            track_id, x1, y1, x2, y2 = boxes[0]
+            self.target_id = track_id
+            self.pending_switch_id, self.pending_switch_count = None, 0
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            bw, bh = x2 - x1, y2 - y1
+            return 1, cx, cy, bw, bh
+
+        # 사람이 2명 이상 -> 누가 타겟인지 구분해야 하므로 특정인물 식별 로직(얼굴/
+        # 외형/옷색깔)을 켠다.
         reid_embeddings = self._get_reid_embeddings()
         faces = self._detect_faces(frame)
 
         people = []  # [(track_id, x1, y1, x2, y2, face_feature_or_None, reid_feature_or_None, clothing_feature)]
-        for box in results.boxes:
-            if box.id is None:
-                continue  # 아직 트랙이 확정되지 않은 박스는 제외
-            track_id = int(box.id[0])
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
+        for track_id, x1, y1, x2, y2 in boxes:
             clothing_feature = self._extract_clothing_feature(frame, x1, y1, x2, y2)
             reid_feature = reid_embeddings.get(track_id)
             face_feature = self._get_face_feature(frame, faces, x1, y1, x2, y2)
             people.append((track_id, x1, y1, x2, y2, face_feature, reid_feature, clothing_feature))
-
-        if not people:
-            return 0, 0, 0, 0, 0
 
         # 타겟이 이 프레임에 실제로 잡혀 있다면, 동시에 같이 잡힌 다른 track_id는
         # "절대 타겟이 아닌 사람"으로 확정 -> 나중에 타겟이 사라져도 얘네는 재획득 후보에서 제외한다.

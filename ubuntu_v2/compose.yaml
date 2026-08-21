@@ -75,6 +75,43 @@ services:
       retries: 3
       start_period: 5s
 
+  # Android sends a short 16 kHz WAV here. Whisper only transcribes it; the
+  # allow-list in voice_command_server.py decides whether it is a robot command.
+  voice-command:
+    image: ${ROBOT_VOICE_IMAGE:-robot-control-v2-voice:bookworm}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.voice
+      args:
+        WHISPER_CPP_VERSION: ${WHISPER_CPP_VERSION:-v1.9.1}
+    container_name: robot-v2-voice-command
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    logging: *service-logging
+    volumes:
+      - ./models:/models
+    environment:
+      VOICE_PORT: ${VOICE_PORT:-10000}
+      COMMAND_TOKEN: ${COMMAND_TOKEN:-change-this-token}
+      WHISPER_MODEL: /models/${WHISPER_MODEL_FILE:-ggml-small.bin}
+      WHISPER_MODEL_URL: ${WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin?download=true}
+      WHISPER_MODEL_SHA1: ${WHISPER_MODEL_SHA1:-55356645c2b361a969dfd0ef2c5a50d530afd8d5}
+      WHISPER_THREADS: ${WHISPER_THREADS:-4}
+      WHISPER_TIMEOUT_SEC: ${WHISPER_TIMEOUT_SEC:-60}
+      VOICE_MIN_AUDIO_RMS: ${VOICE_MIN_AUDIO_RMS:-0.004}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import json,os,urllib.request;
+          data=json.load(urllib.request.urlopen('http://127.0.0.1:'+os.environ['VOICE_PORT']+'/health', timeout=2));
+          assert data['ok'] and data['model_ready']"
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 180s
+
   # Default mapping architecture: Pi performs live SLAM, then the gateway
   # places one completed PGM/YAML snapshot in this server-side worker's inbox.
   # No partial/live raster is reconstructed on the server.

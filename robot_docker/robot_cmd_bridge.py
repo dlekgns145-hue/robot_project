@@ -45,7 +45,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, Int32, String
+from std_msgs.msg import Bool, Float32, Int32, String
 from std_srvs.srv import SetBool, Trigger
 
 from map_bundle import active_navigation_paths, install_navigation_bundle
@@ -75,6 +75,7 @@ REMOTE_NAV_SEND_TIMEOUT = float(os.getenv("REMOTE_NAV_SEND_TIMEOUT_SEC", "8.0"))
 MAP_DIRECTORY = "/opt/robot-control/maps"
 MAP_NAME = "orchard_map"
 LAST_POSE_PATH = f"{MAP_DIRECTORY}/last_pose.json"
+HOME_POSE_PATH = os.getenv("HOME_POSE_PATH", f"{MAP_DIRECTORY}/home_pose.json")
 
 OBSTACLE_AVOIDANCE_ENABLED = True
 OBSTACLE_STOP_DISTANCE_M = 0.40
@@ -89,6 +90,27 @@ BACKUP_TRIGGER_DISTANCE_M = 0.30
 BACKUP_TARGET_DISTANCE_M = 0.55
 BACKUP_MAX_TIME_SEC = 3.0
 BACKUP_SPEED = -0.20
+
+# Follow Me 정지거리는 LiDAR(정확하지만 "이게 내가 따라가는 사람인지" 구분을
+# 못 함)와 카메라(정확한 사람인지는 알지만 박스 비율은 대략치)를 같이 써서
+# 정한다. LiDAR 정면거리만으로 목표 정지거리(약 70cm)를 판단했더니 가구가
+# 많은 공간에서 사람이 아니라 옆 책상/의자 다리를 "이미 도착함"으로 오인해서
+# 사람이 멀리 있어도 전진을 거부하는 문제가 있었다 (실기 확인, 2026-08-20).
+# 그래서 두 단계로 나눈다:
+#   1. FOLLOW_HARD_STOP_DISTANCE_M: 카메라 확인 없이 무조건 적용되는 근접
+#      충돌 방지용 안전장치.
+#   2. FOLLOW_TARGET_STOP_DISTANCE_M: "목표 지점 도착"으로 보고 정지하는
+#      실제 목표 거리. LiDAR가 이 안쪽이라고 재도, follow_person.py가 보내는
+#      카메라 박스 비율(FOLLOW_CAMERA_CONFIRM_RATIO 이상)이 같이 사람이
+#      가깝다고 확인해줄 때만 실제로 멈춘다 -- 그 전까지는 LiDAR가 뭘
+#      감지했든 그냥 가구려니 하고 계속 전진한다.
+# 로봇 실측 폭(바퀴 포함)이 약 20cm로 작아서, follow 전용 안전거리는 일반
+# 장애물 회피(OBSTACLE_STOP_DISTANCE_M=0.40m 등, 수동운전/매핑/내비게이션
+# 공용)보다 더 타이트하게 잡아도 된다고 판단해 따로 낮췄다 (2026-08-20,
+# 사용자 요청 -- follow 관련 거리만 줄이고 일반 장애물 회피는 그대로 둠).
+FOLLOW_HARD_STOP_DISTANCE_M = 0.25
+FOLLOW_TARGET_STOP_DISTANCE_M = 0.40
+FOLLOW_CAMERA_CONFIRM_RATIO = 0.25
 
 LIDAR_MIN_VALID_RANGE = 0.02
 LIDAR_STALE_SEC = 2.0
@@ -119,9 +141,20 @@ ESCAPE_TURN_TIME_SEC = 2.5  # 이 시간 동안 LiDAR 무시하고 무조건 회
 
 # Keep the near floor and low steps visible while retaining enough forward
 # view for normal driving in the classroom.
-SERVO_TILT_DEFAULT = -65
+SERVO_TILT_DEFAULT = -55
 SERVO_PAN_MIN = -60
 SERVO_PAN_MAX = 60
+
+# mapping-runtime을 컨테이너부터 새로 띄우는 경우, 이미지는 있으니 컨테이너
+# 자체는 몇 초면 뜨지만 Nav2/SLAM 라이프사이클 노드들이 /autonomous_mapping/start
+# 서비스를 등록하기까지는 실기 확인상 10~15초 정도 더 걸린다. 클라이언트 소켓
+# 타임아웃(4초)보다 훨씬 기니까 이 대기는 반드시 별도 스레드에서 해야 한다.
+MAPPING_RUNTIME_BOOT_TIMEOUT_SEC = 45.0
+MAPPING_RUNTIME_COMPOSE_TIMEOUT_SEC = 60.0
+# navigation-runtime도 mapping-runtime과 같은 이유로 컨테이너 기동 후 Nav2
+# 라이프사이클 노드들이 /navigate_to_pose 액션 서버를 등록하기까지 시간이
+# 걸린다 -- 지도 크기에 따라 costmap 초기화가 더 걸릴 수 있어 여유를 둔다.
+NAVIGATION_RUNTIME_BOOT_TIMEOUT_SEC = 45.0
 
 
 def is_rear_housing_reflection(angle_radians: float, distance: float) -> bool:
@@ -169,6 +202,36 @@ def shape_server_velocity(linear: float, angular: float) -> tuple[float, float]:
     return linear, angular
 
 
+def validated_home_pose(payload: dict, expected_map_sha256: str) -> dict[str, float | str]:
+    """Validate a home pose and bind it to exactly one occupancy map."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("home pose must be a JSON object")
+    pose_map_sha256 = str(payload.get("map_sha256") or "").lower()
+    if len(pose_map_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in pose_map_sha256
+    ):
+        raise ValueError("home pose has no valid map_sha256")
+    if pose_map_sha256 != expected_map_sha256.lower():
+        raise ValueError("home pose belongs to a different map")
+    try:
+        x = float(payload["x"])
+        y = float(payload["y"])
+        yaw = float(payload["yaw"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("home pose requires numeric x, y, and yaw") from error
+    if not all(math.isfinite(value) for value in (x, y, yaw)):
+        raise ValueError("home pose coordinates must be finite")
+    if abs(x) > 100.0 or abs(y) > 100.0:
+        raise ValueError("home pose is outside the supported map range")
+    return {
+        "x": x,
+        "y": y,
+        "yaw": math.atan2(math.sin(yaw), math.cos(yaw)),
+        "map_sha256": pose_map_sha256,
+    }
+
+
 class CmdBridgeNode(Node):
     def __init__(self):
         super().__init__("cmd_bridge_node")
@@ -194,6 +257,14 @@ class CmdBridgeNode(Node):
         # While this lock is active, socket commands cannot overwrite Nav2's
         # /cmd_vel output. Emergency stop remains available in every mode.
         self.navigation_mode = False
+        # Follow가 켜져 있는 동안, 앱은 화면 조작이 없어도 ~100ms마다
+        # linear=0/angular=0인 실제 이동 명령을 계속 보낸다(heartbeat 플래그가
+        # 없어서 일반 명령으로 처리됨). follow_cmd_callback은 ~200ms마다만
+        # 갱신하므로, 이 유휴 폴링이 더 잦아서 follow의 명령을 거의 다
+        # 덮어써버렸다 (실기 확인, 2026-08-20: /cmd_vel_follow는 계속 -0.4인데
+        # 최종 /cmd_vel은 25개 중 1개만 -0.4). navigation_mode와 같은 패턴으로,
+        # follow가 모터를 갖고 있는 동안은 일반 경로의 명령을 무시한다.
+        self.follow_enabled = False
         self.server_linear = 0.0
         self.server_angular = 0.0
         self.last_server_cmd_at = 0.0
@@ -216,6 +287,8 @@ class CmdBridgeNode(Node):
             "message": "매핑 런타임을 기다리는 중",
             "saved_map": "",
         }
+        self._mapping_autostart_in_progress = False
+        self._navigation_autostart_in_progress = False
         self._last_pose_saved_at = 0.0
         self._last_pose_save_error_at = 0.0
         self._navigation_bundle = self._load_navigation_bundle_status()
@@ -226,6 +299,19 @@ class CmdBridgeNode(Node):
             "low_threshold_g": None,
             "high_threshold_g": None,
             "age_s": None,
+        }
+        self._apple_detection_status = {
+            "connected": False,
+            "model_ready": False,
+            "source": "robot_camera",
+            "state": "unavailable",
+            "healthy_count": 0,
+            "damaged_count": 0,
+            "total_count": 0,
+            "best_confidence": None,
+            "inference_ms": None,
+            "age_s": None,
+            "last_error": None,
         }
 
         self.front_blocked = False
@@ -266,6 +352,14 @@ class CmdBridgeNode(Node):
         self.create_subscription(
             Twist, "/cmd_vel_follow", self.follow_cmd_callback, 10
         )
+        # follow_person.py가 보내는 현재 타겟의 화면상 박스 높이 비율 --
+        # LiDAR가 정면에서 가까운 걸 감지했을 때 그게 실제로 따라가는
+        # 사람인지 확인하는 용도로만 쓴다 (follow_cmd_callback 참고).
+        self.follow_camera_ratio = 0.0
+        self.create_subscription(
+            Float32, "/follow_person/box_height_ratio",
+            self._follow_camera_ratio_callback, 10
+        )
         self.create_subscription(
             Bool, "/cmd_bridge/navigation_lease", self.navigation_lease_callback, 10
         )
@@ -285,6 +379,12 @@ class CmdBridgeNode(Node):
             String,
             "/loadcell_guard/status",
             self._loadcell_status_callback,
+            mapping_qos,
+        )
+        self.create_subscription(
+            String,
+            "/apple_detection/status",
+            self._apple_detection_status_callback,
             mapping_qos,
         )
         self.mapping_clients = {
@@ -349,6 +449,23 @@ class CmdBridgeNode(Node):
         with self.lock:
             return dict(self._loadcell_status)
 
+    def _apple_detection_status_callback(self, message: String):
+        try:
+            payload = json.loads(message.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        # Bounding boxes belong on the MJPEG overlay and can make every TCP
+        # heartbeat unnecessarily large. The app only needs the summary.
+        payload.pop("boxes", None)
+        with self.lock:
+            self._apple_detection_status = payload
+
+    def apple_detection_snapshot(self):
+        with self.lock:
+            return dict(self._apple_detection_status)
+
     @staticmethod
     def _load_navigation_bundle_status():
         path = f"{MAP_DIRECTORY}/navigation_bundle_status.json"
@@ -372,14 +489,134 @@ class CmdBridgeNode(Node):
             self._navigation_bundle = dict(manifest)
         return manifest
 
+    @staticmethod
+    def _call_runtime_launcher(action: str):
+        """mapping_runtime_launcher.py(호스트에서 systemd로 도는 별도 프로세스)에게
+        좁은 유닉스 소켓 하나로 docker compose 액션을 요청한다. mapping-runtime과
+        navigation-runtime 둘 다 이 하나의 런처를 거친다. 반환값은
+        {"ok": bool, "error": str 또는 None}.
+        """
+        socket_path = os.environ.get(
+            "MAPPING_LAUNCHER_SOCKET", "/run/mapping_launcher.sock"
+        )
+        try:
+            launcher_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            launcher_sock.settimeout(MAPPING_RUNTIME_COMPOSE_TIMEOUT_SEC)
+            launcher_sock.connect(socket_path)
+            launcher_sock.sendall(json.dumps({"action": action}).encode("utf-8"))
+            launcher_sock.shutdown(socket.SHUT_WR)
+            raw_response = b""
+            while True:
+                chunk = launcher_sock.recv(4096)
+                if not chunk:
+                    break
+                raw_response += chunk
+            launcher_sock.close()
+            return json.loads(raw_response.decode("utf-8"))
+        except (OSError, socket.timeout, json.JSONDecodeError) as error:
+            return {
+                "ok": False,
+                "error": f"mapping_runtime_launcher 요청 실패 (런처가 안 떠 있을 수 있음): {error}",
+            }
+
+    def _stop_mapping_runtime_container(self):
+        """mapping_stop이 성공한 뒤 mapping-runtime 컨테이너 자체를 내린다.
+
+        /autonomous_mapping/stop은 탐색 동작만 멈출 뿐 Nav2/SLAM 스택이 로드된
+        채로 컨테이너는 계속 떠 있어서, 그대로 잊고 두면 유휴 상태로도 CPU를
+        50~70%씩 계속 잡아먹는다 (실기에서 두 번 발견, 2026-08-20) -- person-detect의
+        CPU를 깎아먹어서 Follow Me 인식이 자꾸 끊기는 원인이 됐었다. mapping_start를
+        다시 누르면 런처가 알아서 재기동하니 안전하게 내려도 된다. 소켓 핸들러
+        스레드를 막지 않도록 항상 별도 데몬 스레드에서만 호출한다.
+        """
+        result = self._call_runtime_launcher("stop_mapping_runtime")
+        if result.get("ok"):
+            self.get_logger().info("mapping-runtime 컨테이너 정지 완료 (유휴 CPU 확보)")
+        else:
+            self.get_logger().error(
+                f"mapping-runtime 컨테이너 정지 실패: {result.get('error')}"
+            )
+
+    def _launch_mapping_runtime_and_start(self):
+        """mapping-runtime 컨테이너를 띄우고, 준비되는 대로 매핑을 시작한다.
+
+        docker compose 실행과 라이프사이클 부팅 대기(최대
+        MAPPING_RUNTIME_BOOT_TIMEOUT_SEC)가 합쳐지면 수십 초가 걸릴 수 있어
+        소켓 핸들러 스레드를 막으면 안 된다. 이 메서드는 항상 별도의
+        데몬 스레드에서만 호출한다 (mapping_command 참고).
+        """
+        try:
+            launch_result = self._call_runtime_launcher("start_mapping_runtime")
+            if not launch_result.get("ok"):
+                self.get_logger().error(
+                    f"mapping-runtime 컨테이너 시작 실패: {launch_result.get('error')}"
+                )
+                return
+            self.get_logger().info("mapping-runtime 컨테이너 기동 완료, 서비스 준비 대기 중")
+
+            client = self.mapping_clients["mapping_start"]
+            if not client.wait_for_service(timeout_sec=MAPPING_RUNTIME_BOOT_TIMEOUT_SEC):
+                self.get_logger().error(
+                    "mapping-runtime이 시간 내에 /autonomous_mapping/start 서비스를 등록하지 않았습니다."
+                )
+                return
+
+            future = client.call_async(Trigger.Request())
+            completed = threading.Event()
+            future.add_done_callback(lambda _future: completed.set())
+            if not completed.wait(5.0):
+                self.get_logger().error("mapping-runtime 자동 시작 요청이 응답하지 않았습니다.")
+                return
+            response = future.result()
+            if response is not None and response.success:
+                self.get_logger().info(f"mapping-runtime 자동 시작 완료: {response.message}")
+            else:
+                message = response.message if response is not None else "응답 없음"
+                self.get_logger().error(f"mapping-runtime 자동 시작 실패: {message}")
+        finally:
+            with self.lock:
+                self._mapping_autostart_in_progress = False
+
+    def _stop_follow_for_mapping(self):
+        """mapping_start가 들어오면 follow부터 내려서 CPU/모터 경합을 막는다.
+
+        follow(YOLO+ReID+얼굴인식)와 mapping(Nav2/SLAM)은 둘 다 무겁고 둘 다
+        /cmd_vel을 쓰려는 자율주행 소스라, 동시에 켜두면 CPU 경합은 물론 모터
+        명령까지 서로 부딪힌다 (실기에서 "/cmd_vel publisher=2" 경고로 확인,
+        2026-08-20). 앱(RobotViewModel)에는 이미 이 상호배타 로직이 있지만,
+        앱을 거치지 않는 경로에서도 항상 지켜지도록 서버에서도 강제한다.
+        follow가 애초에 안 돌고 있었으면 그냥 조용히 무시한다.
+        """
+        try:
+            self.follow_command("follow_stop")
+        except Exception:
+            pass
+
     def mapping_command(self, command_type: str, timeout: float = 3.0):
         client = self.mapping_clients.get(command_type)
         if client is None:
             raise ValueError(f"unsupported mapping command: {command_type}")
+
+        if command_type == "mapping_start":
+            threading.Thread(
+                target=self._stop_follow_for_mapping, daemon=True
+            ).start()
+
         if not client.wait_for_service(timeout_sec=0.4):
-            raise RuntimeError(
-                "매핑 런타임이 실행되지 않았습니다. mapping-runtime을 먼저 시작하세요."
-            )
+            if command_type != "mapping_start":
+                raise RuntimeError(
+                    "매핑 런타임이 실행되지 않았습니다. mapping-runtime을 먼저 시작하세요."
+                )
+            with self.lock:
+                already_in_progress = self._mapping_autostart_in_progress
+                if not already_in_progress:
+                    self._mapping_autostart_in_progress = True
+            if not already_in_progress:
+                threading.Thread(
+                    target=self._launch_mapping_runtime_and_start, daemon=True
+                ).start()
+            return "매핑 런타임을 시작하는 중입니다. 준비되면 자동으로 매핑이 시작됩니다."
+
         future = client.call_async(Trigger.Request())
         completed = threading.Event()
         future.add_done_callback(lambda _future: completed.set())
@@ -393,6 +630,10 @@ class CmdBridgeNode(Node):
             raise RuntimeError("mapping service returned no response")
         if not response.success:
             raise RuntimeError(str(response.message or "mapping command rejected"))
+        if command_type == "mapping_stop":
+            threading.Thread(
+                target=self._stop_mapping_runtime_container, daemon=True
+            ).start()
         return str(response.message or command_type)
 
     @staticmethod
@@ -426,11 +667,29 @@ class CmdBridgeNode(Node):
                 "person-detect가 실행되지 않았습니다. person-detect를 먼저 시작하세요.",
                 timeout,
             )
+            # mapping-runtime(Nav2/SLAM 스택)은 매핑을 안 쓰고 있어도(enabled=False)
+            # 컨테이너가 떠 있기만 하면 유휴 상태로도 CPU를 50~70%씩 계속 잡아먹어서
+            # person-detect의 인식 속도를 깎아먹는다 (실기에서 두 번 확인,
+            # 2026-08-20). mapping-runtime이 왜/언제 떠 있게 됐는지와 무관하게,
+            # follow를 시작할 땐 무조건 내려서 CPU를 확보한다 -- 이미 꺼져있으면
+            # docker compose stop은 그냥 아무 일도 안 하니 안전하다.
+            threading.Thread(
+                target=self._stop_mapping_runtime_container, daemon=True
+            ).start()
+        if command_type == "follow_stop":
+            # 정지 요청이 들어오면 트리거 성공 여부와 무관하게 즉시 일반 명령
+            # 경로(앱 폴링/GUI)에 모터를 돌려준다 -- 실패하거나 타임아웃 나도
+            # follow_enabled=True로 눌러앉아 있으면 안 된다.
+            with self.lock:
+                self.follow_enabled = False
         message = self._call_trigger(
             client,
             "follow-runtime이 실행되지 않았습니다. follow-runtime을 먼저 시작하세요.",
             timeout,
         )
+        if command_type == "follow_start":
+            with self.lock:
+                self.follow_enabled = True
         if command_type == "follow_stop":
             if self.person_detection_pause_client.wait_for_service(timeout_sec=0.2):
                 try:
@@ -702,7 +961,26 @@ class CmdBridgeNode(Node):
         if not math.isfinite(linear) or not math.isfinite(angular):
             self.get_logger().error("follow 속도 명령에 NaN/Inf가 있어 폐기함")
             return
-        self.publish_cmd(linear, angular)
+        # 정지 판단은 두 단계다 (angular는 항상 그대로 둬서, 멈춘 채로도
+        # 사람 쪽을 계속 바라볼 수 있게 한다):
+        #   1. 근접 안전정지 -- 카메라 확인 없이 무조건 적용. 뭐가 됐든 이
+        #      거리 안쪽으로는 절대 안 들어간다.
+        #   2. 목표 도착 정지 -- LiDAR가 가깝다고 재도, 카메라가 보내는 박스
+        #      비율이 같이 사람이 가깝다고 확인해줄 때만 진짜로 멈춘다.
+        #      그렇지 않으면(LiDAR만 가깝다고 하는 경우) 옆에 있는 가구를
+        #      사람으로 오인한 것으로 보고 계속 전진한다.
+        if linear > 0.0 and self.front_min_dist <= FOLLOW_HARD_STOP_DISTANCE_M:
+            linear = 0.0
+        elif (
+            linear > 0.0
+            and self.front_min_dist <= FOLLOW_TARGET_STOP_DISTANCE_M
+            and self.follow_camera_ratio >= FOLLOW_CAMERA_CONFIRM_RATIO
+        ):
+            linear = 0.0
+        self.publish_cmd(linear, angular, source="follow")
+
+    def _follow_camera_ratio_callback(self, msg: Float32):
+        self.follow_camera_ratio = float(msg.data)
 
     def navigation_lease_callback(self, message: Bool):
         """Own motors while the compute mapper renews a short-lived lease."""
@@ -742,12 +1020,14 @@ class CmdBridgeNode(Node):
             f"회피 상태 변경: {new_state} (정면거리={self.front_min_dist:.3f}m)"
         )
 
-    def publish_cmd(self, linear, angular, servo_pan=None, emergency_stop=False):
+    def publish_cmd(self, linear, angular, servo_pan=None, emergency_stop=False, source="generic"):
         if emergency_stop:
             self.emergency_stop()
             return
         with self.lock:
             if self.navigation_mode:
+                return
+            if self.follow_enabled and source != "follow":
                 return
             self.desired_linear = linear
             self.desired_angular = angular
@@ -1061,9 +1341,29 @@ class CmdBridgeNode(Node):
             self._remote_nav_owns_mode = True
 
         if not self.navigator.wait_for_server(timeout_sec=2.0):
-            self._finish_remote_navigation("error", "Nav2 action server가 준비되지 않음")
-            raise ValueError("Nav2 action server is not ready")
+            # navigation-runtime(Nav2 스택)은 mapping-runtime과 같은 이유로
+            # 기본 비활성화돼 있어서(profiles: [navigation]) 아무도 켜준 적이
+            # 없으면 액션 서버가 아예 없다. 예전엔 여기서 바로 에러를 던졌는데,
+            # mapping-runtime엔 이미 만들어둔 자동 기동 로직을 여기도 똑같이
+            # 적용해서 컨테이너부터 띄우고 준비되는 대로 이 목표를 자동으로
+            # 보내게 한다. 클라이언트는 navigation_snapshot()으로 진행 상황을
+            # 계속 폴링하니 여기서 그냥 에러로 끝낼 필요가 없다.
+            with self.lock:
+                already_in_progress = self._navigation_autostart_in_progress
+                if not already_in_progress:
+                    self._navigation_autostart_in_progress = True
+                self._remote_nav_message = "navigation-runtime을 시작하는 중"
+            if not already_in_progress:
+                threading.Thread(
+                    target=self._launch_navigation_runtime_and_navigate,
+                    args=(x, y, yaw),
+                    daemon=True,
+                ).start()
+            return
 
+        self._send_navigation_goal(x, y, yaw)
+
+    def _send_navigation_goal(self, x: float, y: float, yaw: float):
         try:
             self._set_navigation_control(True)
             goal = NavigateToPose.Goal()
@@ -1080,6 +1380,113 @@ class CmdBridgeNode(Node):
         except Exception as error:
             self._finish_remote_navigation("error", f"Nav2 목표 전송 예외: {error}")
             raise
+
+    def _launch_navigation_runtime_and_navigate(self, x: float, y: float, yaw: float):
+        """navigation-runtime 컨테이너를 띄우고, 준비되는 대로 목표를 전송한다.
+
+        mapping-runtime의 _launch_mapping_runtime_and_start와 동일한 패턴 --
+        컨테이너 기동+Nav2 라이프사이클 부팅이 합쳐지면 수십 초가 걸릴 수 있어
+        소켓 핸들러 스레드를 막으면 안 된다. 항상 별도 데몬 스레드에서만
+        호출한다 (start_navigation 참고).
+        """
+        try:
+            launch_result = self._call_runtime_launcher("start_navigation_runtime")
+            if not launch_result.get("ok"):
+                self._finish_remote_navigation(
+                    "error",
+                    f"navigation-runtime 컨테이너 시작 실패: {launch_result.get('error')}",
+                )
+                return
+            self.get_logger().info(
+                "navigation-runtime 컨테이너 기동 완료, 액션 서버 준비 대기 중"
+            )
+            if not self.navigator.wait_for_server(
+                timeout_sec=NAVIGATION_RUNTIME_BOOT_TIMEOUT_SEC
+            ):
+                self._finish_remote_navigation(
+                    "error",
+                    "navigation-runtime이 시간 내에 /navigate_to_pose 액션 서버를 등록하지 않았습니다.",
+                )
+                return
+            self._send_navigation_goal(x, y, yaw)
+        finally:
+            with self.lock:
+                self._navigation_autostart_in_progress = False
+
+    @staticmethod
+    def _active_map_image_path() -> str:
+        active_paths = active_navigation_paths(MAP_DIRECTORY)
+        if active_paths is not None:
+            return str(active_paths[0].with_name("map.pgm"))
+        return f"{MAP_DIRECTORY}/{MAP_NAME}.pgm"
+
+    def _active_map_sha256(self) -> str:
+        image_path = self._active_map_image_path()
+        try:
+            with open(image_path, "rb") as image_file:
+                return hashlib.sha256(image_file.read()).hexdigest()
+        except OSError as error:
+            raise ValueError(f"active navigation map is unavailable: {error}") from error
+
+    def save_home_pose(self):
+        """Persist the current localized AMCL pose as this map's home."""
+
+        with self.lock:
+            pose = None if self._map_pose is None else dict(self._map_pose)
+        if pose is None:
+            raise ValueError("AMCL pose is unavailable; localize the robot before setting home")
+        map_sha256 = self._active_map_sha256()
+        payload = validated_home_pose(
+            {**pose, "map_sha256": map_sha256}, map_sha256
+        )
+        directory = os.path.dirname(HOME_POSE_PATH)
+        os.makedirs(directory, exist_ok=True)
+        temporary = f"{HOME_POSE_PATH}.tmp-{os.getpid()}"
+        try:
+            with open(temporary, "w", encoding="utf-8") as home_file:
+                json.dump(payload, home_file, ensure_ascii=False, separators=(",", ":"))
+                home_file.write("\n")
+                home_file.flush()
+                os.fsync(home_file.fileno())
+            os.replace(temporary, HOME_POSE_PATH)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+        return payload
+
+    def navigate_home(self):
+        with self.lock:
+            mapping_enabled = bool(self._mapping_status.get("enabled", False))
+        if mapping_enabled:
+            raise ValueError("cannot navigate home while autonomous mapping is active")
+        try:
+            self.follow_command("follow_stop", timeout=0.75)
+        except (RuntimeError, TimeoutError, ValueError) as error:
+            # Navigation owns /cmd_vel after start_navigation(). A stale follow node must still
+            # be reported, but a deployment without that optional runtime may navigate home.
+            self.get_logger().warn(f"follow stop before navigate-home was unavailable: {error}")
+        expected_digest = self._active_map_sha256()
+        try:
+            with open(HOME_POSE_PATH, "r", encoding="utf-8") as home_file:
+                payload = json.load(home_file)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"home pose is unavailable: {error}") from error
+        pose = validated_home_pose(payload, expected_digest)
+        self.start_navigation(pose["x"], pose["y"], pose["yaw"])
+        return pose
+
+    def soft_pause(self):
+        """Stop every motion owner without assigning a new navigation target."""
+
+        try:
+            self.follow_command("follow_stop", timeout=0.75)
+        except (RuntimeError, TimeoutError, ValueError) as error:
+            # A missing follow runtime must never prevent the velocity/nav stop below.
+            self.get_logger().warn(f"follow stop during soft pause was unavailable: {error}")
+        self.emergency_stop()
+        return "robot paused"
 
     def _on_navigation_goal_response(self, future):
         try:
@@ -1247,6 +1654,12 @@ class CmdBridgeNode(Node):
         self.cancel_navigation("긴급 정지")
         with self.lock:
             self.navigation_mode = False
+            # follow_person.py의 내부 상태는 아직 살아있을 수 있지만(정식
+            # follow_stop은 별도로 보내야 함), 브릿지 쪽 모터 소유권만큼은
+            # 긴급정지 즉시 일반 명령 경로로 돌려줘야 한다 -- 안 풀어주면
+            # 긴급정지를 눌러도 앱의 일반 명령이 follow_enabled에 계속 막혀서
+            # 조작이 안 되는 안전 공백이 생긴다.
+            self.follow_enabled = False
             self.desired_linear = 0.0
             self.desired_angular = 0.0
             self.server_linear = 0.0
@@ -1304,8 +1717,18 @@ def start_socket_server(node: CmdBridgeNode):
                         json.dumps(response, separators=(",", ":")).encode("utf-8")
                         + b"\n"
                     )
-        except ConnectionResetError:
+        except OSError:
+            # 클라이언트가 응답을 받기 전에 연결을 끊는 경우 (ConnectionResetError,
+            # BrokenPipeError 등) -- 이 한 클라이언트의 연결이 어떻게 끊기든 바깥의
+            # accept 루프 자체는 절대 죽으면 안 된다. 예전엔 ConnectionResetError만
+            # 잡아서, conn.sendall()이 BrokenPipeError(EPIPE)로 실패하는 경우엔 이
+            # 예외가 그대로 새어나가 start_socket_server 스레드 전체가 죽었다 --
+            # 그러면 프로세스는 살아있어도 포트 9999는 완전히 응답 불능이 되고,
+            # 다음 클라이언트는 전부 "connection refused"를 받는다 (실기에서 발생,
+            # 2026-08-20, 컨테이너 수동 재시작 전까지 지속됨).
             pass
+        except Exception as error:  # noqa: BLE001 -- 이 accept 루프는 절대 죽으면 안 됨
+            print(f"클라이언트 처리 중 예상치 못한 오류: {error}", flush=True)
         finally:
             print(f"클라이언트 연결 종료: {addr}", flush=True)
             node.emergency_stop()
@@ -1317,6 +1740,16 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
     command_type = cmd.get("type")
     if command_type == "navigate":
         node.start_navigation(float(cmd["x"]), float(cmd["y"]), float(cmd.get("yaw", 0.0)))
+    elif command_type == "navigate_home":
+        response["home"] = node.navigate_home()
+    elif command_type == "home_set":
+        response["home"] = node.save_home_pose()
+    elif command_type == "soft_pause":
+        response["command_result"] = {
+            "type": command_type,
+            "ok": True,
+            "message": node.soft_pause(),
+        }
     elif command_type == "navigation_cancel":
         node.cancel_navigation()
     elif command_type == "map_request":
@@ -1380,6 +1813,9 @@ def handle_socket_command(node: CmdBridgeNode, cmd: dict):
     loadcell_snapshot = getattr(node, "loadcell_snapshot", None)
     if callable(loadcell_snapshot):
         response["loadcell"] = loadcell_snapshot()
+    apple_detection_snapshot = getattr(node, "apple_detection_snapshot", None)
+    if callable(apple_detection_snapshot):
+        response["apple_detection"] = apple_detection_snapshot()
     return response
 
 

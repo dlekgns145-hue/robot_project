@@ -56,8 +56,8 @@ def legacy_payload(payload: dict[str, Any]) -> dict[str, Any]:
     command_type = payload.get("type", "command")
     if command_type == "emergency_stop":
         return {"linear": 0.0, "angular": 0.0, "emergency_stop": 1}
-    if command_type == "navigation_cancel":
-        return {"type": "navigation_cancel"}
+    if command_type in {"navigation_cancel", "navigate_home", "home_set", "soft_pause"}:
+        return {"type": command_type}
     if command_type == "map_request":
         return {"type": "map_request"}
     if command_type in {
@@ -526,6 +526,12 @@ class RobotRelay:
             mapping = self._robot_response.get("mapping")
             if isinstance(mapping, dict):
                 status["mapping"] = dict(mapping)
+            loadcell = self._robot_response.get("loadcell")
+            if isinstance(loadcell, dict):
+                status["loadcell"] = dict(loadcell)
+            apple_detection = self._robot_response.get("apple_detection")
+            if isinstance(apple_detection, dict):
+                status["apple_detection"] = dict(apple_detection)
             command_result = self._robot_response.get("command_result")
             if isinstance(command_result, dict):
                 status["command_result"] = dict(command_result)

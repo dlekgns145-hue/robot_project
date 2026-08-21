@@ -137,3 +137,26 @@ planner/controller를 포함한 Nav2 bringup이 먼저 실행 중이어야 합�
 2. 팀원 YOLO 코드를 `detect.py`에 연결하고 실제 카메라로 테스트
 3. `follow_person.py` 파라미터(속도, 정지 거리 기준) 실측하며 튜닝
 4. 시간이 남으면 SLAM(STEP2) → 장애물 회피(STEP9) 순으로 추가
+
+## 음성 명령용 home pose
+
+Android 음성 제어는 gateway를 통해 다음 one-shot 명령을 사용합니다.
+
+```text
+soft_pause    현재 Follow/Nav/속도를 안전 정지
+home_set      현재 AMCL pose를 /opt/robot-control/maps/home_pose.json에 저장
+navigate_home 저장된 home pose로 Nav2 이동
+```
+
+`home_set`은 음성으로 실행하지 않습니다. 로봇을 홈 위치에 놓고 AMCL localization을
+확인한 뒤 인증된 TCP 클라이언트에서 한 번 전송해야 합니다. 저장 파일에는 현재 PGM의
+SHA-256이 함께 들어가며 지도가 바뀌면 `navigate_home`이 거절되므로 새 지도에서 다시
+home을 설정해야 합니다. 자동 매핑 중인 `navigate_home` 요청도 거절됩니다.
+
+```bash
+python3 ubuntu_v2/scripts/set_home_pose.py \
+  --gateway 192.168.0.10 \
+  --robot raspberrypi.local
+```
+
+스크립트가 제어 토큰을 화면에 표시하지 않는 입력창으로 요청합니다.

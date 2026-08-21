@@ -1,0 +1,41 @@
+name: robot-voice
+
+services:
+  voice-command:
+    image: robot-control-v2-voice:bookworm
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.voice
+      args:
+        WHISPER_CPP_VERSION: v1.9.1
+    container_name: robot-v2-voice-command
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    environment:
+      VOICE_PORT: "10000"
+      COMMAND_TOKEN: ${COMMAND_TOKEN:?COMMAND_TOKEN is required}
+      WHISPER_MODEL: /models/ggml-small.bin
+      WHISPER_MODEL_URL: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin?download=true
+      WHISPER_MODEL_SHA1: 55356645c2b361a969dfd0ef2c5a50d530afd8d5
+      WHISPER_THREADS: "4"
+      WHISPER_TIMEOUT_SEC: "90"
+      VOICE_MIN_AUDIO_RMS: "0.004"
+    volumes:
+      - ./models:/models
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import json,urllib.request;
+          data=json.load(urllib.request.urlopen('http://127.0.0.1:10000/health', timeout=2));
+          assert data['ok'] and data['model_ready']"
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 240s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

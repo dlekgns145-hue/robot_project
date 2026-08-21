@@ -19,7 +19,7 @@ Windows/macOS GUI
   - 수동/Follow 명령
         │ TCP 9999 (고정 대상: Ubuntu VM)
         ▼
-Ubuntu VM Docker: gateway + map-postprocessor
+Ubuntu VM Docker: gateway + voice-command + map-postprocessor
   - GUI 토큰 검증
   - 로봇 Wi-Fi MAC → 현재 DHCP IP 탐색
   - 완료된 PGM/YAML 원본을 한 번만 수신·보존
@@ -28,6 +28,8 @@ Ubuntu VM Docker: gateway + map-postprocessor
   - 저장 시점 로봇 자세를 같은 좌표변환으로 보정해 Pi로 반환
   - UTM NAT에서는 GUI가 해석한 raspberrypi.local IP를 보조 전달
   - IP 변경/연결 끊김 시 자동 재탐색
+  - Android의 4초 WAV를 다국어 Whisper small로 한국어 전사
+  - allow-list에 등록된 방언 표현만 네 가지 안전 명령으로 반환
         │ TCP 9999 (현재 로봇 IP로 자동 연결)
         ▼
 실물 로봇 Raspberry Pi
@@ -60,6 +62,24 @@ cp -n .env.example .env
 시작`은 TCP gateway를 통해 Pi의 로컬 매핑 런타임에 전달됩니다. 완료본은
 `ubuntu_v2/maps/raw`에 보존되고, 보정 스냅샷은 `maps/corrected`, 최종 지도와
 처리 보고서·전후 비교 이미지는 `maps/orchard_map*`에 저장됩니다.
+
+### Android 방언 음성 명령
+
+`voice-command` 서비스는 첫 실행 때 다국어 `small` 모델(약 466 MiB)을
+`ubuntu_v2/models`에 한 번 내려받습니다. 학습 데이터나 별도 파인튜닝은 필요 없습니다.
+Android 앱이 VM의 `10000/tcp`로 보내는 16 kHz mono WAV만 처리하며, 제어 TCP와 같은
+`COMMAND_TOKEN`을 요구합니다.
+
+```bash
+docker compose build voice-command
+docker compose up -d voice-command
+curl http://127.0.0.1:10000/health
+docker compose logs -f voice-command
+```
+
+전사문이 `WAIT`, `STOP`, `FOLLOW`, `GO_HOME`의 검토된 표현과 정확히 일치할 때만 앱에
+명령을 반환합니다. 임의 문장과 무음은 no-op입니다. 실제 로봇 운용 전에는 사용할
+경상·제주 발화자로 네 명령을 반복 시험해 누락 표현만 allow-list에 추가해야 합니다.
 
 Pi는 원본 PGM의 SHA-256과 `map -> base_footprint` 자세를 같이 저장합니다.
 서버가 지도를 회전·크롭하면 동일한 3×3 affine 변환을 `x, y, yaw`에도

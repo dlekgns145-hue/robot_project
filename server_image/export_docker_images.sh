@@ -10,11 +10,33 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 cd "${PROJECT_DIR}/ubuntu_v2"
-docker compose --profile compute build gateway map-postprocessor
+docker compose --profile compute build gateway map-postprocessor voice-command
+
+MODEL_PATH="${PROJECT_DIR}/ubuntu_v2/models/ggml-large-v3-turbo-q5_0.bin"
+MODEL_SHA1="e050f7970618a659205450ad97eb95a18d69c9ee"
+if [[ ! -s "${MODEL_PATH}" ]]; then
+    install -d "$(dirname "${MODEL_PATH}")"
+    TEMP_MODEL="${MODEL_PATH}.download"
+    curl -L --fail --retry 3 \
+        --output "${TEMP_MODEL}" \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin?download=true"
+    if command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA1="$(shasum -a 1 "${TEMP_MODEL}" | awk '{print $1}')"
+    else
+        ACTUAL_SHA1="$(sha1sum "${TEMP_MODEL}" | awk '{print $1}')"
+    fi
+    if [[ "${ACTUAL_SHA1}" != "${MODEL_SHA1}" ]]; then
+        rm -f "${TEMP_MODEL}"
+        echo "Whisper model checksum mismatch" >&2
+        exit 1
+    fi
+    mv "${TEMP_MODEL}" "${MODEL_PATH}"
+fi
 install -d "${OUTPUT_DIR}"
 docker save -o "${OUTPUT_DIR}/robot-control-server-images.tar" \
     robot-control-v2-gateway:bookworm \
-    robot-control-compute:humble
+    robot-control-compute:humble \
+    robot-control-v2-voice:bookworm
 
 echo "Created ${OUTPUT_DIR}/robot-control-server-images.tar"
-echo "Run build_server_image.sh again to include it in an offline bundle."
+echo "Run build_server_image.sh again to include the images and Whisper model in an offline bundle."

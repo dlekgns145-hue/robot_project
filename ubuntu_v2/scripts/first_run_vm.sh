@@ -26,13 +26,14 @@ else
 fi
 
 docker compose config >/dev/null
-docker compose build gateway
-docker compose up -d gateway
+docker compose build gateway voice-command
+docker compose up -d gateway voice-command
 docker compose ps
-docker compose logs --tail=50 gateway
+docker compose logs --tail=50 gateway voice-command
 
 echo
 echo "GUI 설정"
 echo "  포트: 9999"
+echo "  음성 포트: 10000"
 echo "  로봇 이름: raspberrypi.local"
 echo "  토큰: $(sed -n 's/^COMMAND_TOKEN=//p' .env)"

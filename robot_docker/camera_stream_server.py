@@ -27,6 +27,7 @@ camera_stream_server.py - 로봇(Pi) 위에서 실행하는 파일
       FRAME_WIDTH / FRAME_HEIGHT / JPEG_QUALITY 값을 조정하세요.
 """
 
+import json
 import cv2
 import time
 import threading
@@ -34,7 +35,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 
 CAMERA_INDEX = 0  # /dev/video0
@@ -52,6 +55,86 @@ stop_flag = False
 ros_node = None
 image_publisher = None
 cv_bridge = CvBridge()
+apple_status = None
+apple_status_received_at = 0.0
+apple_status_lock = threading.Lock()
+
+
+def apple_status_callback(message):
+    global apple_status, apple_status_received_at
+    try:
+        payload = json.loads(message.data)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    with apple_status_lock:
+        apple_status = payload
+        apple_status_received_at = time.monotonic()
+
+
+def draw_apple_overlay(frame):
+    """Draw recent classifier results only on MJPEG, never on the ROS source."""
+    with apple_status_lock:
+        status = None if apple_status is None else dict(apple_status)
+        received_at = apple_status_received_at
+    if status is None or time.monotonic() - received_at > 2.5:
+        return frame
+
+    annotated = frame.copy()
+    state = str(status.get("state", "none"))
+    healthy = int(status.get("healthy_count", 0) or 0)
+    damaged = int(status.get("damaged_count", 0) or 0)
+    if state == "damaged":
+        banner_text = f"APPLE  DAMAGED {damaged}  NORMAL {healthy}"
+        banner_color = (30, 30, 220)
+    elif state == "healthy":
+        banner_text = f"APPLE  NORMAL {healthy}"
+        banner_color = (40, 180, 40)
+    elif state == "error":
+        banner_text = "APPLE MODEL ERROR"
+        banner_color = (0, 120, 230)
+    elif state in {"starting", "waiting_for_camera"}:
+        banner_text = "APPLE MODEL STARTING"
+        banner_color = (120, 120, 120)
+    else:
+        banner_text = "APPLE  NOT FOUND"
+        banner_color = (90, 90, 90)
+
+    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 25), banner_color, -1)
+    cv2.putText(
+        annotated,
+        banner_text,
+        (6, 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    for box in status.get("boxes", []):
+        if not isinstance(box, dict):
+            continue
+        label = str(box.get("label", ""))
+        color = (35, 35, 235) if label == "damaged_apple" else (45, 205, 45)
+        try:
+            x1, y1, x2, y2 = (int(box[key]) for key in ("x1", "y1", "x2", "y2"))
+            confidence = float(box.get("confidence", 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        short_label = "DAMAGED" if label == "damaged_apple" else "NORMAL"
+        cv2.putText(
+            annotated,
+            f"{short_label} {confidence:.0%}",
+            (max(0, x1), max(38, y1 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+    return annotated
 
 
 def capture_loop():
@@ -85,13 +168,6 @@ def capture_loop():
                 print("[camera_stream] 프레임 읽기 실패 - 카메라 재연결")
                 break
 
-            ok, jpeg = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-            )
-            if ok:
-                with frame_lock:
-                    latest_frame = jpeg.tobytes()
-
             if image_publisher is not None:
                 try:
                     image_msg = cv_bridge.cv2_to_imgmsg(frame, encoding="bgr8")
@@ -100,6 +176,14 @@ def capture_loop():
                     image_publisher.publish(image_msg)
                 except Exception as error:
                     print(f"[camera_stream] ROS 이미지 발행 실패: {error}")
+
+            stream_frame = draw_apple_overlay(frame)
+            ok, jpeg = cv2.imencode(
+                ".jpg", stream_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+            )
+            if ok:
+                with frame_lock:
+                    latest_frame = jpeg.tobytes()
 
             time.sleep(interval)
 
@@ -149,6 +233,15 @@ def main():
     rclpy.init()
     ros_node = Node("camera_stream_node")
     image_publisher = ros_node.create_publisher(Image, "/camera/image_raw", 10)
+    apple_qos = QoSProfile(depth=1)
+    apple_qos.reliability = ReliabilityPolicy.RELIABLE
+    apple_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+    ros_node.create_subscription(
+        String, "/apple_detection/status", apple_status_callback, apple_qos
+    )
+
+    spin_thread = threading.Thread(target=rclpy.spin, args=(ros_node,), daemon=True)
+    spin_thread.start()
 
     t = threading.Thread(target=capture_loop, daemon=True)
     t.start()

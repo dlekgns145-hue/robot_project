@@ -10,13 +10,13 @@ sudo ./INSTALL_SERVER.sh
 ```
 
 설치 프로그램은 Docker Engine과 Compose plugin이 없으면 Docker 공식 저장소에서
-설치하고, gateway와 지도 후처리 이미지를 빌드한 다음 systemd에
+설치하고, gateway·Whisper 음성 명령·지도 후처리 이미지를 빌드한 다음 systemd에
 등록합니다. 이후 PC를 재부팅해도 서버가 자동으로 시작됩니다.
 
 인터넷이 없는 Ubuntu에 옮기려면 먼저 Docker가 실행되는 같은 CPU 아키텍처의
 컴퓨터에서 `server_image/export_docker_images.sh`를 실행한 뒤
 `server_image/build_server_image.sh`를 다시 실행합니다. 생성되는 큰 배포 파일에는
-Docker 이미지 레이어까지 포함되어 대상 PC에서 다시 다운로드하거나 빌드하지
+Docker 이미지 레이어와 Whisper 모델까지 포함되어 대상 PC에서 다시 다운로드하거나 빌드하지
 않습니다. Docker Engine 자체 패키지는 대상 PC에 미리 설치되어 있어야 합니다.
 
 기본값은 현재 로봇에 맞춰져 있습니다.
@@ -25,6 +25,7 @@ Docker 이미지 레이어까지 포함되어 대상 PC에서 다시 다운로�
 로봇 IP  172.30.1.10
 로봇 MAC 2c:cf:67:7b:48:d7
 GUI 포트 9999
+음성 포트 10000
 ```
 
 다른 값으로 설치하려면 다음처럼 지정합니다.
@@ -50,7 +51,7 @@ sudo sed -n 's/^COMMAND_TOKEN=//p' \
 sudo systemctl status robot-control-server
 cd /opt/robot-control-server/ubuntu_v2
 sudo docker compose --profile compute ps
-sudo docker compose --profile compute logs -f gateway map-postprocessor
+sudo docker compose --profile compute logs -f gateway voice-command map-postprocessor
 ```
 
 원본 지도, 보정 지도, 처리 보고서와 운영 기록은 재설치해도 보존됩니다.

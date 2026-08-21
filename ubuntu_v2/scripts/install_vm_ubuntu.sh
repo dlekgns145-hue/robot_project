@@ -48,7 +48,7 @@ install -m 0644 \
 systemctl daemon-reload
 cd "${TARGET_DIR}"
 docker compose config >/dev/null
-docker compose build gateway
+docker compose build gateway voice-command
 systemctl enable --now robot-control-v2.service
 
 echo "Ubuntu VM robot gateway installed in ${TARGET_DIR}."

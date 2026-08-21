@@ -6,6 +6,7 @@ COMPOSE_DIR="${INSTALL_DIR}/ubuntu_v2"
 REQUIRED_CONTAINERS=(
     robot-v2-gateway
     robot-v2-map-postprocessor
+    robot-v2-voice-command
 )
 failures=0
 
@@ -75,6 +76,9 @@ if [[ -n "${robot_ip}" ]]; then
     ip route get "${robot_ip}" 2>&1 | head -n 1
 fi
 
+voice_port="$(container_env robot-v2-voice-command VOICE_PORT)"
+printf 'voice API: http://%s:%s/health\n' "$(hostname -I 2>/dev/null | awk '{print $1}')" "${voice_port:-10000}"
+
 section "map post-processing"
 map_root="${COMPOSE_DIR}/maps"
 install -d "${map_root}/postprocess-inbox" "${map_root}/raw" "${map_root}/corrected"
@@ -91,5 +95,5 @@ if (( failures > 0 )); then
     printf 'PRECHECK FAILED: %d critical check(s) failed.\n' "${failures}"
     exit 1
 fi
-printf 'PRECHECK OK: gateway and map post-processor are ready.\n'
+printf 'PRECHECK OK: gateway, voice model, and map post-processor are ready.\n'
 printf 'A map WAIT line is expected until the next completed mapping run.\n'

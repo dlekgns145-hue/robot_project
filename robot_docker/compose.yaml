@@ -96,9 +96,19 @@ services:
       - agent
     volumes:
       - ./maps:/opt/robot-control/maps
+      - ./robot_cmd_bridge.py:/opt/robot-control/robot_cmd_bridge.py:ro
+      # mapping_start가 왔는데 mapping-runtime이 안 떠 있으면 브릿지가
+      # mapping_runtime_launcher.py(호스트에서 systemd로 별도 실행, docker
+      # 그룹 권한)에게 이 소켓 하나로만 "mapping-runtime 띄워줘"를 요청한다.
+      # docker.sock을 직접 물리지 않는 이유: 그러면 브릿지 컨테이너가 호스트
+      # 도커 전체를 조작할 수 있게 되어, 통제 브릿지 하나가 뚫리면 로봇
+      # 호스트까지 뚫리는 셈이 된다. 이 소켓은 "그 컨테이너 하나 시작" 이상은
+      # 아무것도 못 하도록 런처 쪽에서 액션을 하드코딩해 좁혀둔다.
+      - ./mapping_launcher.sock:/run/mapping_launcher.sock
     environment:
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
+      MAPPING_LAUNCHER_SOCKET: "/run/mapping_launcher.sock"
       # Keep the command bridge on the image-default FastDDS implementation.
       # With ROS_LOCALHOST_ONLY=1, CycloneDDS disables multicast on loopback
       # and the bridge cannot discover mapping-runtime in another container.
@@ -126,6 +136,33 @@ services:
     volumes:
       - /dev:/dev
       - /dev/shm:/dev/shm
+      - ./camera_stream_server.py:/opt/robot-control/camera_stream_server.py:ro
+
+  # Always-on apple quality inspection. The camera service remains the only
+  # owner of /dev/video0; this node consumes its ROS image topic and publishes
+  # normal/damaged detections for the stream overlay and Android status UI.
+  apple-detect:
+    <<: *ros-service
+    container_name: robot-apple-detect
+    restart: always
+    entrypoint: ["bash", "/opt/robot-control/apple/apple_detection_entrypoint.sh"]
+    command: []
+    volumes:
+      - ./apple_detection_node.py:/opt/robot-control/apple/apple_detection_node.py:ro
+      - ./apple_detection_entrypoint.sh:/opt/robot-control/apple/apple_detection_entrypoint.sh:ro
+      - "${APPLE_MODEL_HOST_PATH:-../apple_defect_detection/apple_defect_v5_local.pt}:/opt/robot-control/apple/apple_defect_v5_local.pt:ro"
+    environment:
+      ROS_DISTRO: "humble"
+      ROS_DOMAIN_ID: "20"
+      ROS_LOCALHOST_ONLY: "1"
+      APPLE_MODEL_PATH: "/opt/robot-control/apple/apple_defect_v5_local.pt"
+      APPLE_CAMERA_TOPIC: "${APPLE_CAMERA_TOPIC:-/camera/image_raw}"
+      APPLE_CONFIDENCE: "${APPLE_CONFIDENCE:-0.65}"
+      APPLE_IOU: "${APPLE_IOU:-0.45}"
+      APPLE_IMGSZ: "${APPLE_IMGSZ:-320}"
+      APPLE_MIN_INTERVAL_SEC: "${APPLE_MIN_INTERVAL_SEC:-0.8}"
+    depends_on:
+      - camera
 
   # Low obstacles and network command expiry must be handled on the robot,
   # even when SLAM/Nav2 run on an external compute server.
@@ -136,35 +173,32 @@ services:
     depends_on:
       - camera
 
-  # Weight threshold detection (loadcell_guard.py). The HX711 is wired
-  # directly to the Pi5's own GPIO header, not through the ESP32/micro-ROS
-  # path, so this service needs no compute server and no dependency on
-  # agent/base -- it runs standalone even in mode A (robot-only, see
-  # HANDOFF.md 4절).
+  # The Arduino sketch owns the HX711, the 2.8 g classification rule and
+  # the sorting servo. This read-only bridge only translates its 9600-baud USB
+  # Serial output into the existing ROS loadcell topics.
   loadcell:
     <<: *ros-service
     container_name: robot-loadcell-guard
+    restart: always
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BASE_IMAGE: yahboomtechnology/ros-humble:4.1.2
-    command: ["loadcell"]
-    privileged: true
+    entrypoint: ["/opt/robot-control/arduino_loadcell_entrypoint.sh"]
+    command: []
+    devices:
+      - "${ROBOT_LOADCELL_SERIAL_DEVICE:-/dev/serial/by-id/usb-FIREPHX_USB_SER_FX2348N-if00}:/dev/loadcell-arduino"
     volumes:
-      - /dev:/dev
+      - ./arduino_loadcell_bridge.py:/opt/robot-control/navigation/arduino_loadcell_bridge.py:ro
+      - ./arduino_loadcell_entrypoint.sh:/opt/robot-control/arduino_loadcell_entrypoint.sh:ro
     environment:
       ROS_DOMAIN_ID: "20"
       ROS_LOCALHOST_ONLY: "1"
-      ROBOT_LOADCELL_DT_PIN: "${ROBOT_LOADCELL_DT_PIN:-5}"
-      ROBOT_LOADCELL_SCK_PIN: "${ROBOT_LOADCELL_SCK_PIN:-6}"
-      # Calibration is per-physical-sensor and has no sane default -- see
-      # loadcell_guard.py's raw_to_grams(). Must be set after a real
-      # calibration (tare with an empty tray, then a known reference weight).
-      ROBOT_LOADCELL_TARE_OFFSET: "${ROBOT_LOADCELL_TARE_OFFSET:-0}"
-      ROBOT_LOADCELL_GRAMS_PER_COUNT: "${ROBOT_LOADCELL_GRAMS_PER_COUNT:-0.0}"
-      ROBOT_LOADCELL_LOW_THRESHOLD_G: "${ROBOT_LOADCELL_LOW_THRESHOLD_G:-0.0}"
-      ROBOT_LOADCELL_HIGH_THRESHOLD_G: "${ROBOT_LOADCELL_HIGH_THRESHOLD_G:-100000.0}"
+      ROBOT_LOADCELL_SERIAL_DEVICE: "/dev/loadcell-arduino"
+      ROBOT_LOADCELL_SERIAL_BAUD: "9600"
+      ROBOT_LOADCELL_LOW_THRESHOLD_G: "0.8"
+      ROBOT_LOADCELL_HIGH_THRESHOLD_G: "2.8"
 
   # Explicit profile: YOLO person detection publishes to /person_detection but
   # never touches /cmd_vel by itself -- follow-runtime is the one that moves.
